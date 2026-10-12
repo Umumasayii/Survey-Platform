@@ -66,6 +66,16 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
     # REACTIVE STATE FOR WIZARD
     # =========================================================================
     
+    setting <- function(key, fallback) {
+      if (!is.null(services) && !is.null(services$settings)) {
+        return(services$settings$get(key, fallback))
+      }
+      fallback
+    }
+    default_missing <- as.character(setting(
+      "missing_value_labels", c("", "NA", "N/A", "NULL", "99", "999", "-99")
+    ))
+
     wizard_state <- reactiveValues(
       current_step = 1,
       raw_data = NULL,
@@ -75,23 +85,69 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
       file_ext = NULL,
       sheets = NULL,
       sheet = NULL,
+      selected_sheets = NULL,
       import_options = list(
         header = TRUE,
         delimiter = ",",
         decimal = ".",
-        encoding = "UTF-8",
-        clean_names = TRUE,
-        trim_whitespace = TRUE,
+        encoding = as.character(setting("imp_encoding", "UTF-8")),
+        clean_names = isTRUE(setting("imp_clean_names", TRUE)),
+        trim_whitespace = isTRUE(setting("imp_trim", TRUE)),
         remove_empty_rows = TRUE,
         remove_empty_cols = TRUE,
-        auto_detect_dates = TRUE,
-        missing_codes = c("", "NA", "N/A", "NULL", "99", "999", "-99")
+        auto_detect_dates = isTRUE(setting("imp_detect_dates", TRUE)),
+        missing_codes = unique(default_missing)
       ),
       variable_types = NULL,
       variable_labels = NULL,
       validation_results = NULL,
-      import_log = data.frame()
+      parse_problems = data.frame(),
+      import_log = data.frame(),
+      imported = FALSE
     )
+
+    capture_parse_problems <- function(df) {
+      probs <- attr(df, "sap_parse_problems", exact = TRUE)
+      if (!is.data.frame(probs)) probs <- data.frame()
+      wizard_state$parse_problems <- probs
+      invisible(probs)
+    }
+
+    # Stage a non-upload source (pasted text or URL) using the same state
+    # structure as fileInput(). This keeps the remaining five wizard steps
+    # identical regardless of where the survey data came from.
+    stage_source <- function(df, name, size_bytes = 0, ext = "csv",
+                             path = NULL, sheet = NULL, n_sheets = 0L) {
+      stopifnot(is.data.frame(df))
+      if (nrow(df) == 0L || ncol(df) == 0L) {
+        stop("The data source is empty.")
+      }
+
+      wizard_state$file_path <- path
+      wizard_state$file_ext <- ext
+      wizard_state$sheets <- NULL
+      wizard_state$sheet <- sheet
+      wizard_state$selected_sheets <- NULL
+      wizard_state$raw_data <- df
+      capture_parse_problems(df)
+      wizard_state$file_info <- list(
+        name = name,
+        size = as.numeric(size_bytes),
+        path = path,
+        ext = ext,
+        sheet = sheet,
+        n_sheets = as.integer(n_sheets),
+        nrows = nrow(df),
+        ncols = ncol(df)
+      )
+
+      # Any variable metadata or validation belongs to the previous source.
+      wizard_state$variable_types <- NULL
+      wizard_state$variable_labels <- NULL
+      wizard_state$validation_results <- NULL
+      wizard_state$imported <- FALSE
+      invisible(df)
+    }
     
     # =========================================================================
     # STEP INDICATOR
@@ -169,8 +225,8 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
               class = "mt-3",
               fileInput(
                 ns("upload_file"),
-                "Choose file (CSV or Excel)",
-                accept = c(".csv", ".xlsx", ".xls", ".txt", ".tsv")
+                "Choose data file",
+                accept = c(".csv", ".xlsx", ".xls", ".txt", ".tsv", ".sav", ".dta", ".sas7bdat", ".json", ".parquet")
               ),
               span(
                 class = "small text-muted d-block mb-2",
@@ -220,27 +276,64 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
       )
     }
     
-    # Worksheet picker. Only rendered for Excel workbooks; a single-sheet
-    # workbook still shows it (read-only information about what was loaded).
+    # Excel workbook navigator + multi-sheet import selection. The preview
+    # worksheet is independent from the worksheets selected for the workbook
+    # cleaning workspace. This lets users inspect one sheet while importing
+    # many sheets together.
     output$excel_sheet_ui <- renderUI({
       sheets <- wizard_state$sheets
       if (is.null(sheets) || !length(sheets)) return(NULL)
 
+      selected <- input$excel_import_sheets %||% wizard_state$selected_sheets %||% sheets
+      selected <- intersect(selected, sheets)
+      if (!length(selected)) selected <- sheets[1]
+
       div(
-        class = "mb-3 p-2 border rounded bg-light",
+        class = "mb-3 p-3 border rounded bg-light",
+        h6(icon("table-list"), " Excel workbook"),
         selectInput(
           ns("excel_sheet"),
-          label = tagList(icon("table-list"), " Worksheet"),
-          choices  = sheets,
+          label = "Worksheet to preview now",
+          choices = sheets,
           selected = wizard_state$sheet %||% sheets[1],
           width = "100%"
         ),
-        span(
+        checkboxGroupInput(
+          ns("excel_import_sheets"),
+          label = "Worksheets to import into the cleaning workspace",
+          choices = sheets,
+          selected = selected
+        ),
+        div(
+          class = "d-flex gap-2 mb-2",
+          actionButton(ns("excel_select_all"), "Select all", class = "btn btn-sm btn-outline-secondary"),
+          actionButton(ns("excel_select_preview"), "Only previewed sheet", class = "btn btn-sm btn-outline-secondary")
+        ),
+        div(
           class = "small text-muted",
-          sprintf("%d worksheet%s in this workbook",
-                  length(sheets), if (length(sheets) == 1L) "" else "s")
+          "Each selected worksheet is preserved separately, can be cleaned one-by-one in Visual Cleaning Workbench, and can be merged after cleaning."
         )
       )
+    })
+
+    observeEvent(input$excel_import_sheets, {
+      sheets <- isolate(wizard_state$sheets %||% character())
+      selected <- intersect(input$excel_import_sheets %||% character(), sheets)
+      wizard_state$selected_sheets <- selected
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$excel_select_all, {
+      sheets <- isolate(wizard_state$sheets %||% character())
+      updateCheckboxGroupInput(session, "excel_import_sheets", selected = sheets)
+      wizard_state$selected_sheets <- sheets
+    })
+
+    observeEvent(input$excel_select_preview, {
+      sel <- isolate(wizard_state$sheet %||% "")
+      if (nzchar(sel)) {
+        updateCheckboxGroupInput(session, "excel_import_sheets", selected = sel)
+        wizard_state$selected_sheets <- sel
+      }
     })
 
     # Handle file upload
@@ -255,8 +348,8 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
         # Determine file type
         ext <- tolower(tools::file_ext(file_name))
 
-        if (!ext %in% c("csv", "txt", "tsv", "xlsx", "xls")) {
-          showNotification("Unsupported file format. Please use CSV, TSV, TXT or Excel.",
+        if (!ext %in% c("csv", "txt", "tsv", "xlsx", "xls", "sav", "dta", "sas7bdat", "json", "parquet")) {
+          showNotification("Unsupported file format. Use CSV/TSV/TXT, Excel, SPSS, Stata, SAS, JSON or Parquet.",
                            type = "error")
           return()
         }
@@ -286,7 +379,9 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
         wizard_state$file_ext  <- ext
         wizard_state$sheets    <- if (length(sheets)) sheets else NULL
         wizard_state$sheet     <- first_sheet
+        wizard_state$selected_sheets <- if (length(sheets)) sheets else NULL
         wizard_state$raw_data  <- df
+        capture_parse_problems(df)
 
         wizard_state$file_info <- list(
           name = file_name,
@@ -308,6 +403,129 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
         
       }, error = function(e) {
         showNotification(paste("Error loading file:", e$message), type = "error")
+      })
+    })
+
+    # Parse data pasted directly into the wizard. Delimiter detection is
+    # deliberately conservative: tabs first, then semicolons when they are more
+    # common than commas, otherwise standard CSV.
+    observeEvent(input$btn_parse_paste, {
+      text <- input$paste_data
+      if (is.null(text) || !nzchar(trimws(text))) {
+        showNotification("Paste some comma-, semicolon-, or tab-separated data first.",
+                         type = "warning")
+        return()
+      }
+
+      tryCatch({
+        first_line <- strsplit(text, "\n", fixed = FALSE)[[1]][1]
+        comma_n <- lengths(regmatches(first_line, gregexpr(",", first_line, fixed = TRUE)))
+        semi_n <- lengths(regmatches(first_line, gregexpr(";", first_line, fixed = TRUE)))
+        sep <- if (grepl("\t", first_line)) "\t" else if (semi_n > comma_n) ";" else ","
+
+        con <- textConnection(text)
+        on.exit(close(con), add = TRUE)
+        df <- utils::read.table(
+          con,
+          header = TRUE,
+          sep = sep,
+          quote = "\"",
+          comment.char = "",
+          fill = TRUE,
+          check.names = FALSE,
+          stringsAsFactors = FALSE,
+          na.strings = wizard_state$import_options$missing_codes
+        )
+
+        stage_source(
+          df,
+          name = "pasted_survey_data.csv",
+          size_bytes = nchar(text, type = "bytes"),
+          ext = "csv"
+        )
+        showNotification(
+          sprintf("Pasted data parsed: %d rows × %d columns", nrow(df), ncol(df)),
+          type = "message"
+        )
+      }, error = function(e) {
+        showNotification(paste("Could not parse pasted data:", conditionMessage(e)),
+                         type = "error")
+      })
+    })
+
+    # Download a public CSV/TSV/Excel URL to a temporary file and feed it into
+    # the same full-file reader used by fileInput(). The central Studio network
+    # policy enforces HTTPS, blocks private destinations, limits redirects and
+    # stops downloads at the configured size ceiling.
+    observeEvent(input$btn_load_url, {
+      url <- trimws(input$url_input %||% "")
+      if (!nzchar(url)) {
+        showNotification("Enter a data file URL first.", type = "warning")
+        return()
+      }
+      if (!grepl("^https://", url, ignore.case = TRUE) &&
+          !identical(Sys.getenv("SAP_ALLOW_HTTP_IMPORT", "false"), "true")) {
+        showNotification("Only HTTPS data URLs are supported.",
+                         type = "error")
+        return()
+      }
+
+      tryCatch({
+        clean_url <- sub("[?#].*$", "", url)
+        ext <- tolower(tools::file_ext(clean_url))
+        if (!ext %in% c("csv", "txt", "tsv", "xlsx", "xls")) ext <- "csv"
+        tmp <- sap_bi_download_remote(
+          url,
+          max_mb = services$settings$get("max_file_size", 100),
+          timeout_seconds = 30
+        )
+        session$onSessionEnded(function() unlink(tmp))
+
+        df <- withProgress(
+          message = "Loading data from URL",
+          detail = "Downloading and reading the dataset",
+          value = 0.25,
+          {
+            incProgress(0.6)
+            sheets <- if (ext %in% c("xlsx", "xls")) excel_sheet_names(tmp)
+                      else character(0)
+            first_sheet <- if (length(sheets)) sheets[1] else NULL
+            result <- read_any_file(tmp, ext, sheet = first_sheet)
+            incProgress(0.2)
+            attr(result, "sap_sheets") <- sheets
+            attr(result, "sap_sheet") <- first_sheet
+            result
+          }
+        )
+
+        sheets <- attr(df, "sap_sheets")
+        first_sheet <- attr(df, "sap_sheet")
+        attr(df, "sap_sheets") <- NULL
+        attr(df, "sap_sheet") <- NULL
+        source_name <- basename(clean_url)
+        if (!nzchar(source_name)) source_name <- paste0("url_dataset.", ext)
+
+        stage_source(
+          df,
+          name = source_name,
+          size_bytes = file.info(tmp)$size,
+          ext = ext,
+          path = tmp,
+          sheet = first_sheet,
+          n_sheets = length(sheets)
+        )
+        if (length(sheets)) {
+          wizard_state$sheets <- sheets
+          wizard_state$selected_sheets <- sheets
+        }
+
+        showNotification(
+          sprintf("URL data loaded: %d rows × %d columns", nrow(df), ncol(df)),
+          type = "message"
+        )
+      }, error = function(e) {
+        showNotification(paste("Could not load URL:", conditionMessage(e)),
+                         type = "error")
       })
     })
 
@@ -338,6 +556,7 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
 
         wizard_state$sheet     <- sel
         wizard_state$raw_data  <- df
+        capture_parse_problems(df)
         wizard_state$file_info <- fi
 
         # Downstream steps were derived from the old sheet.
@@ -358,7 +577,20 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
         return(NULL)
       }
       
-      div(
+      tagList(
+        if (is.data.frame(wizard_state$parse_problems) && nrow(wizard_state$parse_problems) > 0L) {
+          div(
+            class = "alert alert-warning mt-3 mb-2",
+            icon("triangle-exclamation"),
+            strong(sprintf(" %s parsing issue%s detected. ",
+                           nrow(wizard_state$parse_problems),
+                           if (nrow(wizard_state$parse_problems) == 1L) "" else "s")),
+            "The file was loaded, but review the affected columns before analysis. ",
+            actionButton(ns("view_parse_problems"), "View details",
+                         class = "btn btn-sm btn-outline-dark ms-2")
+          )
+        },
+        div(
         class = "alert alert-info mt-3",
         div(
           class = "d-flex justify-content-between align-items-center mb-3",
@@ -379,8 +611,28 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
           width = "100%"
         )
       )
+      )
     })
     
+    observeEvent(input$view_parse_problems, {
+      req(is.data.frame(wizard_state$parse_problems), nrow(wizard_state$parse_problems) > 0L)
+      showModal(modalDialog(
+        title = tagList(icon("triangle-exclamation"), "Parsing issues"),
+        size = "l", easyClose = TRUE,
+        p("These cells did not match the inferred column type. Correct the source file or review the affected columns before analysis."),
+        DT::DTOutput(ns("parse_problems_dt")),
+        footer = modalButton("Close")
+      ))
+    }, ignoreInit = TRUE)
+
+    output$parse_problems_dt <- DT::renderDT({
+      req(is.data.frame(wizard_state$parse_problems), nrow(wizard_state$parse_problems) > 0L)
+      DT::datatable(
+        wizard_state$parse_problems, rownames = FALSE,
+        options = list(scrollX = TRUE, pageLength = 10)
+      )
+    })
+
     # Preview modal - show full dataset with navigation
     observeEvent(input$btn_preview_modal, {
       req(wizard_state$raw_data)
@@ -517,7 +769,10 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
           class = "row mt-2",
           div(class = "col-md-6", strong("Worksheet:"), br(), info$sheet),
           div(class = "col-md-6", strong("Sheets in file:"), br(),
-              info$n_sheets %||% 1L)
+              info$n_sheets %||% 1L),
+          if ((info$n_sheets %||% 1L) > 1L)
+            div(class = "col-md-6 mt-2", strong("Selected for workspace:"), br(),
+                length(input$excel_import_sheets %||% wizard_state$selected_sheets %||% character()))
         )
       )
     })
@@ -987,6 +1242,15 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
       df <- load_data_with_options(wizard_state$raw_data, wizard_state$import_options)
       
       tagList(
+        if (wizard_state$file_ext %in% c("xlsx", "xls") && length(wizard_state$sheets %||% character()) > 1L)
+          div(
+            class = "alert alert-primary",
+            icon("layer-group"),
+            strong(sprintf(" %d worksheet%s selected for the cleaning workspace. ",
+                           length(input$excel_import_sheets %||% wizard_state$selected_sheets %||% character()),
+                           if (length(input$excel_import_sheets %||% wizard_state$selected_sheets %||% character()) == 1L) "" else "s")),
+            "This summary previews only the currently selected worksheet. After import, use Data Cleaning -> Visual Cleaning Workbench to move through every selected sheet, clean them independently, reuse cleaning recipes, and merge them when ready."
+          ),
         div(
           class = "row mb-4",
           div(
@@ -1090,88 +1354,156 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
     
     observeEvent(input$btn_confirm_import, {
       tryCatch({
-        # Load and process data
-        df <- load_data_with_options(wizard_state$raw_data, wizard_state$import_options)
-        
-        # Handle missing codes
-        df <- handle_missing_codes(df, wizard_state$import_options$missing_codes)
-        
-        # Clean names if requested
-        if (wizard_state$import_options$clean_names) {
-          df <- clean_names(df, case = "snake")
+        source_name <- wizard_state$file_info$name %||% "Imported Survey"
+        ext <- wizard_state$file_ext %||% tolower(tools::file_ext(source_name))
+        is_excel <- ext %in% c("xlsx", "xls") && length(wizard_state$sheets %||% character()) > 0L
+
+        # Process one worksheet using exactly the same import options that the
+        # six-step wizard exposes. Raw data is never overwritten.
+        process_one <- function(raw_df) {
+          out <- load_data_with_options(raw_df, wizard_state$import_options)
+          if (isTRUE(wizard_state$import_options$clean_names)) {
+            out <- clean_names(out, case = "snake")
+          }
+          as.data.frame(out, stringsAsFactors = FALSE, check.names = FALSE)
         }
-        
-        # Commit the dataset. Prefer the backend service (single source of
-        # truth: bumps data version, invalidates cache, logs, persists via
-        # DAL). Fall back to direct app_state writes if services not wired,
-        # so the module still works standalone during incremental migration.
+
+        raw_sheets <- list()
+        processed_sheets <- list()
+        type_sheets <- list()
+
+        if (is_excel) {
+          selected <- input$excel_import_sheets %||% wizard_state$selected_sheets %||% wizard_state$sheets
+          selected <- intersect(as.character(selected), wizard_state$sheets)
+          if (!length(selected)) stop("Select at least one worksheet to import.")
+
+          withProgress(message = "Importing selected worksheets", value = 0, {
+            for (i in seq_along(selected)) {
+              nm <- selected[i]
+              incProgress(1 / length(selected), detail = sprintf("Reading %s (%d of %d)", nm, i, length(selected)))
+              raw_i <- read_any_file(wizard_state$file_path, ext, sheet = nm)
+              if (!is.data.frame(raw_i) || ncol(raw_i) == 0L) {
+                stop(sprintf("Worksheet '%s' is empty or unreadable.", nm))
+              }
+              raw_sheets[[nm]] <- raw_i
+              processed_sheets[[nm]] <- process_one(raw_i)
+              type_sheets[[nm]] <- tryCatch(
+                detect_variable_types_extended(processed_sheets[[nm]]),
+                error = function(e) NULL
+              )
+            }
+          })
+
+          active <- wizard_state$sheet %||% selected[1]
+          if (!active %in% selected) active <- selected[1]
+          raw_active <- raw_sheets[[active]]
+          df <- processed_sheets[[active]]
+          variable_types_active <- type_sheets[[active]] %||% tryCatch(detect_variable_types_extended(df), error = function(e) wizard_state$variable_types)
+
+          # Workbook workspace: each sheet has an immutable raw copy and an
+          # independent cleaned copy. The Data Cleaning module can navigate
+          # between them and preserve per-sheet histories.
+          app_state$workbook_name <- source_name
+          app_state$workbook_raw_sheets <- raw_sheets
+          app_state$workbook_sheets <- processed_sheets
+          app_state$workbook_sheet_types <- type_sheets
+          app_state$workbook_cleaning_histories <- setNames(vector("list", length(selected)), selected)
+          app_state$workbook_history_indices <- setNames(as.list(rep(0L, length(selected))), selected)
+          app_state$guided_cleaning_steps <- setNames(vector("list", length(selected)), selected)
+          app_state$saved_cleaning_recipes <- list()
+          app_state$workbook_merge_history <- list()
+          app_state$active_sheet <- active
+          app_state$raw_data <- raw_active
+          app_state$processed_data <- df
+          app_state$variable_types <- variable_types_active
+          app_state$data_imported <- TRUE
+          app_state$dataset_name <- paste0(tools::file_path_sans_ext(source_name), " - ", active)
+        } else {
+          raw_active <- wizard_state$raw_data
+          df <- process_one(raw_active)
+          variable_types_active <- wizard_state$variable_types %||% tryCatch(detect_variable_types_extended(df), error = function(e) NULL)
+
+          # Clear any previous workbook session when importing a single-table
+          # source so old sheets cannot accidentally appear in the cleaner.
+          app_state$workbook_name <- NULL
+          app_state$workbook_raw_sheets <- list()
+          app_state$workbook_sheets <- list()
+          app_state$workbook_sheet_types <- list()
+          app_state$workbook_cleaning_histories <- list()
+          app_state$workbook_history_indices <- list()
+          app_state$guided_cleaning_steps <- list()
+          app_state$saved_cleaning_recipes <- list()
+          app_state$active_sheet <- ""
+          app_state$raw_data <- raw_active
+          app_state$processed_data <- df
+          app_state$variable_types <- variable_types_active
+          app_state$data_imported <- TRUE
+          app_state$dataset_name <- tools::file_path_sans_ext(source_name)
+        }
+
+        # Commit the active dataset through the backend service. The workbook
+        # workspace remains in app_state so all selected worksheets can be
+        # cleaned independently without forcing the existing single-dataset
+        # services to change their storage contract.
         if (!is.null(services)) {
-          # Ensure a project exists BEFORE the dataset write, so persistence
-          # has somewhere to land. On a fresh start there is no current
-          # project, so DatasetService$set()'s DAL write would be a no-op and
-          # the import would vanish on reopen. Auto-creating a project here is
-          # what makes "import -> close -> reopen -> still there" work without
-          # the user having to think about projects at all.
           if (!is.null(services$project) &&
+              !is.null(app_state$current_user) &&
               is.null(services$project$current_id())) {
-            base <- tools::file_path_sans_ext(
-              wizard_state$file_info$name %||% "Imported dataset")
+            base <- tools::file_path_sans_ext(source_name)
             services$project$create(
               name = sprintf("%s", base),
               description = "Auto-created on first import",
               persist_current = FALSE)
           }
 
-          # raw stays in app_state (service governs the *active* dataset)
-          app_state$raw_data <- wizard_state$raw_data
+          services$data$set(
+            raw_active,
+            kind = "raw",
+            module = "import_wizard",
+            description = if (is_excel) sprintf("Stored original worksheet '%s' from %s", app_state$active_sheet, source_name) else sprintf("Stored original import: %s", source_name),
+            variable_types = app_state$variable_types,
+            name = app_state$dataset_name
+          )
           services$data$set(
             df,
-            kind           = "processed",
-            module         = "import_wizard",
-            description    = sprintf("Imported %s",
-                                     wizard_state$file_info$name %||% "dataset"),
-            variable_types = wizard_state$variable_types
+            kind = "processed",
+            module = "import_wizard",
+            description = if (is_excel) sprintf("Imported worksheet '%s' from %s", app_state$active_sheet, source_name) else sprintf("Imported %s", source_name),
+            variable_types = app_state$variable_types,
+            name = app_state$dataset_name
           )
-        } else {
-          app_state$raw_data       <- wizard_state$raw_data
-          app_state$processed_data <- df
-          app_state$data_imported  <- TRUE
-          app_state$variable_types <- wizard_state$variable_types
         }
-        
-        # Create import log entry
+
+        app_state$last_action <- if (is_excel) {
+          sprintf("Imported %d worksheet%s from %s", length(processed_sheets), if (length(processed_sheets) == 1L) "" else "s", source_name)
+        } else sprintf("Imported %s", source_name)
+        app_state$transformation_count <- 0L
+
         log_entry <- data.frame(
           timestamp = Sys.time(),
-          file_name = wizard_state$file_info$name,
+          file_name = source_name,
           rows = nrow(df),
           columns = ncol(df),
-          file_size_kb = round(wizard_state$file_info$size / 1024, 1)
+          file_size_kb = round(wizard_state$file_info$size / 1024, 1),
+          worksheets = if (is_excel) length(processed_sheets) else 1L,
+          stringsAsFactors = FALSE
         )
-        
+        # Normalize an older import log that did not yet have a worksheets column.
+        if (is.data.frame(app_state$import_log) && nrow(app_state$import_log) && !"worksheets" %in% names(app_state$import_log)) app_state$import_log$worksheets <- 1L
         app_state$import_log <- rbind(app_state$import_log, log_entry)
-        
-        # Success notification (via service when available, else direct)
-        msg <- sprintf("Import successful: %d rows x %d columns loaded",
-                       nrow(df), ncol(df))
-        if (!is.null(services)) {
-          services$notify$success(msg, module = "import_wizard")
+
+        msg <- if (is_excel && length(processed_sheets) > 1L) {
+          sprintf("Import successful: %d worksheets loaded. Start with '%s' (%d rows x %d columns), then clean sheets one-by-one in Visual Cleaning Workbench.", length(processed_sheets), app_state$active_sheet, nrow(df), ncol(df))
         } else {
-          showNotification(
-            HTML(paste0("<strong>✓ Import Successful!</strong><br>",
-                        nrow(df), " rows × ", ncol(df), " columns loaded")),
-            type = "message", duration = 5
-          )
+          sprintf("Import successful: %d rows x %d columns loaded", nrow(df), ncol(df))
         }
-        
-        # Mark as imported. Stay on the Summary step (do not reset to step 1)
-        # so the user sees the success state with View / Edit actions, and the
-        # Next button stays hidden.
+        if (!is.null(services)) services$notify$success(msg, module = "import_wizard") else showNotification(msg, type = "message", duration = 7)
+
         wizard_state$imported <- TRUE
-        
+
       }, error = function(e) {
         if (!is.null(services)) {
-          services$notify$error(paste("Import failed:", e$message),
-                                module = "import_wizard")
+          services$notify$error(paste("Import failed:", e$message), module = "import_wizard")
         } else {
           showNotification(paste("Import failed:", e$message), type = "error")
         }
@@ -1188,6 +1520,7 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
       wizard_state$file_ext <- NULL
       wizard_state$sheets <- NULL
       wizard_state$sheet <- NULL
+      wizard_state$selected_sheets <- NULL
       showNotification("Import cancelled", type = "info")
     })
     
@@ -1234,6 +1567,23 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
                              stringsAsFactors = FALSE, check.names = FALSE))
       }
 
+      # --- Statistical packages / interchange formats ---------------------
+      if (ext == "sav") return(as.data.frame(haven::read_sav(path), stringsAsFactors = FALSE, check.names = FALSE))
+      if (ext == "dta") return(as.data.frame(haven::read_dta(path), stringsAsFactors = FALSE, check.names = FALSE))
+      if (ext == "sas7bdat") return(as.data.frame(haven::read_sas(path), stringsAsFactors = FALSE, check.names = FALSE))
+      if (ext == "parquet") {
+        return(as.data.frame(
+          sap_optional_call("arrow", "read_parquet", path, feature = "Parquet import"),
+          stringsAsFactors = FALSE, check.names = FALSE
+        ))
+      }
+      if (ext == "json") {
+        obj <- jsonlite::fromJSON(path, simplifyDataFrame = TRUE)
+        if (is.data.frame(obj)) return(as.data.frame(obj, stringsAsFactors = FALSE, check.names = FALSE))
+        if (is.list(obj) && length(obj) == 1L && is.data.frame(obj[[1]])) return(as.data.frame(obj[[1]], stringsAsFactors = FALSE, check.names = FALSE))
+        stop("JSON must contain a rectangular array/object that can be represented as a data frame.")
+      }
+
       # --- Delimited text: detect delimiter from the header line -----------
       line1 <- tryCatch(
         readLines(path, n = 1, warn = FALSE), error = function(e) "")
@@ -1255,19 +1605,21 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
         }, error = function(e) "UTF-8")
 
         df <- tryCatch(
-          readr::read_delim(
+          suppressWarnings(readr::read_delim(
             path, delim = delim,
             locale = readr::locale(encoding = enc),
             guess_max = 1e6,          # infer types from up to 1M rows
             show_col_types = FALSE,
             name_repair = "minimal",
             progress = FALSE
-          ),
+          )),
           error = function(e) NULL
         )
         if (!is.null(df) && ncol(df) > 0) {
-          return(as.data.frame(df, stringsAsFactors = FALSE,
-                              check.names = FALSE))
+          probs <- tryCatch(readr::problems(df), error = function(e) data.frame())
+          out <- as.data.frame(df, stringsAsFactors = FALSE, check.names = FALSE)
+          attr(out, "sap_parse_problems") <- probs
+          return(out)
         }
       }
 
@@ -1331,8 +1683,12 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
     # Extended variable type detection
     detect_variable_types_extended <- function(df) {
       result <- detect_variable_types(df)
-      result$label <- rep("", nrow(result))
-      return(result)
+      result$survey_role <- unname(infer_survey_roles(df)[result$variable])
+      result$label <- vapply(result$variable, function(v) {
+        lbl <- attr(df[[v]], "label", exact = TRUE)
+        if (is.null(lbl) || !nzchar(trimws(as.character(lbl)))) "" else as.character(lbl)
+      }, character(1))
+      result
     }
     
     # Comprehensive data validation
@@ -1391,4 +1747,4 @@ mod_import_wizard_server <- function(id, app_state, services = NULL) {
 # =============================================================================
 # =============================================================================
 
-message("[SAP] Import Wizard v2.8-20260709 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Import Wizard v5.2.0 multi-sheet loaded")  # SAP_MODULE_BANNER

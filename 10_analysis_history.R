@@ -45,143 +45,198 @@ create_action <- function(action_type, module, description,
 
 #' History manager class
 #' @return R6 object managing action history
+# State fields intentionally included in reversible snapshots. UI-only values,
+# service objects, credentials, and connection handles are excluded.
+SAP_HISTORY_STATE_FIELDS <- c(
+  "raw_data", "processed_data", "data_imported", "variable_types",
+  "variable_dictionary", "settings", "import_log", "current_project",
+  "current_project_name", "project_path", "project_saved", "dataset_name",
+  "quality_score", "transformation_count", "last_action", "trained_models",
+  "last_model", "model_predictions", "analyses", "last_analysis",
+  "survey_design", "questionnaire", "routing_rules", "scale_definitions",
+  "nonresponse_plan", "table_builder_spec", "advanced_model_queue",
+  "text_codebook", "geospatial_spec", "longitudinal_spec",
+  "privacy_register", "governance_policy", "report_frontend_blocks",
+  "frontend_activity", "active_filter_label", "health_log"
+)
+
+sap_history_clone <- function(x) {
+  # Deep-copy ordinary workspaces; avoid an expensive serialization pass for
+  # very large datasets and rely on R's copy-on-modify semantics instead.
+  size_bytes <- suppressWarnings(as.numeric(utils::object.size(x)))
+  if (is.finite(size_bytes) && size_bytes > 100 * 1024^2) return(x)
+  tryCatch(unserialize(serialize(x, NULL)), error = function(e) x)
+}
+
+sap_capture_app_state <- function(app_state, fields = SAP_HISTORY_STATE_FIELDS,
+                                  isolate_read = FALSE) {
+  read_values <- function() shiny::reactiveValuesToList(app_state, all.names = TRUE)
+  values <- if (isTRUE(isolate_read)) shiny::isolate(read_values()) else read_values()
+  fields <- intersect(fields, names(values))
+  sap_history_clone(values[fields])
+}
+
+sap_restore_app_state <- function(app_state, snapshot) {
+  if (is.null(snapshot) || !is.list(snapshot)) return(invisible(FALSE))
+  for (name in intersect(names(snapshot), SAP_HISTORY_STATE_FIELDS)) {
+    app_state[[name]] <- sap_history_clone(snapshot[[name]])
+  }
+  invisible(TRUE)
+}
+
+sap_history_module_from_action <- function(description) {
+  text <- tolower(as.character(description %||% "workspace")[1])
+  if (grepl("import|dataset|data lab", text)) return("Data")
+  if (grepl("clean|transform|recode", text)) return("Data Cleaning")
+  if (grepl("health", text)) return("Personal Health")
+  if (grepl("survey design|weight", text)) return("Survey Design")
+  if (grepl("question|routing", text)) return("Questionnaire")
+  if (grepl("scale|composite", text)) return("Scale Analysis")
+  if (grepl("privacy|governance", text)) return("Privacy")
+  if (grepl("model", text)) return("Models")
+  if (grepl("report", text)) return("Report")
+  if (grepl("setting|ai", text)) return("Settings")
+  "Workspace"
+}
+
 HistoryManager <- R6::R6Class(
   "HistoryManager",
   public = list(
     actions = list(),
-    current_index = 0,
-    
-    initialize = function() {
+    current_index = 0L,
+    current_snapshot = NULL,
+    version = NULL,
+    max_actions = 20L,
+
+    initialize = function(max_actions = 20L) {
       self$actions <- list()
-      self$current_index <- 0
+      self$current_index <- 0L
+      self$current_snapshot <- NULL
+      self$max_actions <- max(1L, as.integer(max_actions)[1])
+      self$version <- shiny::reactiveVal(0L)
     },
-    
-    #' Add action to history
-    add_action = function(action) {
-      # Remove redo stack if new action is taken
-      if (self$current_index < length(self$actions)) {
-        self$actions <- self$actions[1:self$current_index]
-      }
-      
-      self$actions[[length(self$actions) + 1]] <- action
-      self$current_index <- length(self$actions)
+
+    touch = function() {
+      self$version(shiny::isolate(self$version()) + 1L)
       invisible(self)
     },
-    
-    #' Get current state
+
+    seed_state = function(state) {
+      self$current_snapshot <- sap_history_clone(state)
+      invisible(self)
+    },
+
+    add_action = function(action) {
+      if (self$current_index < length(self$actions)) {
+        self$actions <- if (self$current_index == 0L) list() else
+          self$actions[seq_len(self$current_index)]
+      }
+      self$actions[[length(self$actions) + 1L]] <- action
+      if (length(self$actions) > self$max_actions) {
+        keep <- seq.int(length(self$actions) - self$max_actions + 1L,
+                        length(self$actions))
+        self$actions <- self$actions[keep]
+      }
+      self$current_index <- length(self$actions)
+      self$current_snapshot <- sap_history_clone(action$data_after)
+      self$touch()
+      invisible(self)
+    },
+
+    record_state = function(action_type, module, description, state, r_code = "") {
+      state <- sap_history_clone(state)
+      if (is.null(self$current_snapshot)) {
+        self$seed_state(state)
+        return(invisible(FALSE))
+      }
+      if (identical(state, self$current_snapshot)) return(invisible(FALSE))
+      action <- create_action(
+        action_type = action_type, module = module, description = description,
+        r_code = r_code, data_before = self$current_snapshot,
+        data_after = state, reversible = TRUE
+      )
+      self$add_action(action)
+      invisible(TRUE)
+    },
+
     get_current = function() {
-      if (self$current_index == 0) return(NULL)
+      if (self$current_index == 0L) return(NULL)
       self$actions[[self$current_index]]
     },
-    
-    #' Can undo?
-    can_undo = function() {
-      self$current_index > 1
-    },
-    
-    #' Can redo?
-    can_redo = function() {
-      self$current_index < length(self$actions)
-    },
-    
-    #' Undo last action
+
+    can_undo = function() self$current_index > 0L,
+    can_redo = function() self$current_index < length(self$actions),
+
     undo = function() {
-      if (self$can_undo()) {
-        self$current_index <- self$current_index - 1
-        return(self$get_current())
-      }
-      NULL
+      if (!self$can_undo()) return(NULL)
+      action <- self$actions[[self$current_index]]
+      self$current_index <- self$current_index - 1L
+      self$current_snapshot <- sap_history_clone(action$data_before)
+      self$touch()
+      action
     },
-    
-    #' Redo last action
+
     redo = function() {
-      if (self$can_redo()) {
-        self$current_index <- self$current_index + 1
-        return(self$get_current())
-      }
-      NULL
+      if (!self$can_redo()) return(NULL)
+      next_index <- self$current_index + 1L
+      action <- self$actions[[next_index]]
+      self$current_index <- next_index
+      self$current_snapshot <- sap_history_clone(action$data_after)
+      self$touch()
+      action
     },
-    
-    #' Get history summary
+
     get_summary = function() {
-      if (length(self$actions) == 0) {
-        return(data.frame())
-      }
-      
+      if (length(self$actions) == 0L) return(data.frame())
       data.frame(
-        id = sapply(self$actions, function(a) a$id),
-        timestamp = sapply(self$actions, function(a) a$timestamp),
-        type = sapply(self$actions, function(a) a$type),
-        module = sapply(self$actions, function(a) a$module),
-        description = sapply(self$actions, function(a) a$description),
-        reversible = sapply(self$actions, function(a) a$reversible),
+        id = vapply(self$actions, function(a) a$id, character(1)),
+        timestamp = as.POSIXct(vapply(self$actions, function(a) as.numeric(a$timestamp), numeric(1)),
+                               origin = "1970-01-01", tz = "UTC"),
+        type = vapply(self$actions, function(a) a$type, character(1)),
+        module = vapply(self$actions, function(a) a$module, character(1)),
+        description = vapply(self$actions, function(a) a$description, character(1)),
+        reversible = vapply(self$actions, function(a) isTRUE(a$reversible), logical(1)),
+        applied = seq_along(self$actions) <= self$current_index,
         stringsAsFactors = FALSE
       )
     },
-    
-    #' Get R code for all actions
+
     get_r_code = function() {
-      if (length(self$actions) == 0) {
-        return("")
-      }
-      
+      if (length(self$actions) == 0L) return("")
       code_lines <- c(
         "# Auto-generated R code from Survey Analytics Platform",
-        "# This code reproduces all analyses performed",
-        "",
-        "library(dplyr)",
-        "library(tidyr)",
-        "library(ggplot2)",
-        ""
+        "# Only actions that supplied reproducible R code are included.",
+        "", "library(dplyr)", "library(tidyr)", "library(ggplot2)", ""
       )
-      
-      for (action in self$actions) {
-        if (action$r_code != "") {
-          code_lines <- c(
-            code_lines,
-            sprintf("# %s", action$description),
-            action$r_code,
-            ""
-          )
+      applied <- if (self$current_index == 0L) list() else
+        self$actions[seq_len(self$current_index)]
+      for (action in applied) {
+        if (nzchar(action$r_code %||% "")) {
+          code_lines <- c(code_lines, sprintf("# %s", action$description),
+                          action$r_code, "")
         }
       }
-      
       paste(code_lines, collapse = "\n")
     },
-    
-    #' Export history as markdown
+
     export_markdown = function() {
       summary <- self$get_summary()
-      
-      if (nrow(summary) == 0) {
-        return("# Analysis History\n\nNo actions recorded yet.")
-      }
-      
+      if (nrow(summary) == 0L) return("# Analysis History\n\nNo actions recorded yet.")
       lines <- c(
-        "# Analysis History",
-        "",
+        "# Analysis History", "",
         sprintf("Total actions: %d", length(self$actions)),
-        sprintf("Time span: %s to %s", 
-               format(min(summary$timestamp), "%Y-%m-%d %H:%M:%S"),
-               format(max(summary$timestamp), "%Y-%m-%d %H:%M:%S")),
-        "",
-        "## Action Timeline",
-        ""
+        sprintf("Currently applied: %d", self$current_index),
+        "", "## Action Timeline", ""
       )
-      
-      for (i in 1:nrow(summary)) {
-        s <- summary[i, ]
-        lines <- c(
-          lines,
-          sprintf("### %d. %s", i, s$description),
-          sprintf("- **Time**: %s", format(s$timestamp, "%Y-%m-%d %H:%M:%S")),
-          sprintf("- **Module**: %s", s$module),
-          sprintf("- **Type**: %s", s$type),
-          sprintf("- **Reversible**: %s", ifelse(s$reversible, "Yes", "No")),
-          ""
-        )
+      for (i in seq_len(nrow(summary))) {
+        row <- summary[i, ]
+        lines <- c(lines, sprintf("### %d. %s", i, row$description),
+          sprintf("- **Time**: %s", format(row$timestamp, "%Y-%m-%d %H:%M:%S")),
+          sprintf("- **Module**: %s", row$module),
+          sprintf("- **Type**: %s", row$type),
+          sprintf("- **Applied**: %s", if (row$applied) "Yes" else "No (redo available)"),
+          "")
       }
-      
       paste(lines, collapse = "\n")
     }
   )
@@ -271,7 +326,7 @@ mod_analysis_history_ui <- function(id) {
               div(class = "card-body text-center",
                 div(class = "display-4 text-success mb-2",
                     textOutput(ns("reversible_actions"))),
-                p("Can Undo", class = "text-muted mb-0")
+                p("Available Undo Steps", class = "text-muted mb-0")
               )
             )
           ),
@@ -302,117 +357,96 @@ mod_analysis_history_ui <- function(id) {
 # SERVER FUNCTION
 # =============================================================================
 
-mod_analysis_history_server <- function(id, app_state, history_manager = NULL) {
+mod_analysis_history_server <- function(id, app_state, history_manager = NULL,
+                                        services = NULL) {
   moduleServer(id, function(input, output, session) {
-    
-    ns <- session$ns
-    
-    # Initialize history manager if not provided
     if (is.null(history_manager)) {
       history_manager <- HistoryManager$new()
+      history_manager$seed_state(sap_capture_app_state(app_state, isolate_read = TRUE))
     }
-    
-    # Undo button
+
     observeEvent(input$btn_undo, {
-      if (history_manager$can_undo()) {
-        action <- history_manager$undo()
-        showNotification(
-          sprintf("Undo: %s", action$description),
-          type = "message"
-        )
-        # Would restore app_state from action$data_before here
+      action <- history_manager$undo()
+      if (is.null(action)) {
+        showNotification("Nothing is available to undo.", type = "warning")
+        return(invisible(NULL))
       }
+      sap_restore_app_state(app_state, action$data_before)
+      showNotification(sprintf("Undid: %s", action$description), type = "message")
     })
-    
-    # Redo button
+
     observeEvent(input$btn_redo, {
-      if (history_manager$can_redo()) {
-        action <- history_manager$redo()
-        showNotification(
-          sprintf("Redo: %s", action$description),
-          type = "message"
-        )
+      action <- history_manager$redo()
+      if (is.null(action)) {
+        showNotification("Nothing is available to redo.", type = "warning")
+        return(invisible(NULL))
       }
+      sap_restore_app_state(app_state, action$data_after)
+      showNotification(sprintf("Redid: %s", action$description), type = "message")
     })
-    
-    # Timeline output
+
     output$history_timeline <- renderTable({
+      history_manager$version()
       summary <- history_manager$get_summary()
-      if (nrow(summary) == 0) {
-        return(data.frame("Message" = "No actions recorded yet"))
-      }
-      
+      if (nrow(summary) == 0L) return(data.frame(Message = "No reversible actions recorded yet"))
       summary$timestamp <- format(summary$timestamp, "%Y-%m-%d %H:%M:%S")
       summary$reversible <- ifelse(summary$reversible, "Yes", "No")
-      summary[, c("timestamp", "module", "description", "reversible")]
+      summary$applied <- ifelse(summary$applied, "Applied", "Redo available")
+      summary[, c("timestamp", "module", "description", "applied", "reversible")]
     })
-    
-    # Generated R code
+
     output$generated_code <- renderText({
+      history_manager$version()
       history_manager$get_r_code()
     })
-    
-    # Copy code to clipboard
+
     observeEvent(input$btn_copy_code, {
       code <- history_manager$get_r_code()
-      
-      # Use JavaScript to copy (requires shinyjs)
       shinyjs::runjs(sprintf(
-        "
-        var code = %s;
-        navigator.clipboard.writeText(code).then(() => {
-          alert('R code copied to clipboard!');
-        });
-        ",
-        jsonlite::toJSON(code)
+        "var code = %s; navigator.clipboard.writeText(code).then(() => { alert('R code copied to clipboard!'); });",
+        jsonlite::toJSON(code, auto_unbox = TRUE)
       ))
     })
-    
-    # Export markdown
+
     output$export_markdown <- downloadHandler(
-      filename = function() {
-        paste0("analysis_history_", format(Sys.Date(), "%Y%m%d"), ".md")
-      },
+      filename = function() paste0("analysis_history_", format(Sys.Date(), "%Y%m%d"), ".md"),
       content = function(file) {
-        markdown <- history_manager$export_markdown()
-        writeLines(markdown, file)
+        if (!is.null(services) && !is.null(services$privacy)) {
+          services$privacy$assert_content_export_allowed(
+            history_manager$export_markdown(), "analysis history export"
+          )
+        }
+        writeLines(history_manager$export_markdown(), file)
       }
     )
-    
-    # Statistics
+
     output$total_actions <- renderText({
+      history_manager$version()
       length(history_manager$actions)
     })
 
     output$reversible_actions <- renderText({
-      acts <- history_manager$actions
-      if (length(acts) == 0) return("0")
-      # vapply guarantees a logical vector, so sum() never receives a list
-      as.character(sum(vapply(acts, function(a) isTRUE(a$reversible), logical(1))))
+      history_manager$version()
+      as.character(history_manager$current_index)
     })
 
     output$analysis_time <- renderText({
+      history_manager$version()
       acts <- history_manager$actions
-      if (length(acts) < 2) {
-        "N/A"
-      } else {
-        # timestamps are POSIXct; unlist drops class, so compute on numeric seconds
-        times <- vapply(acts, function(a) as.numeric(a$timestamp), numeric(1))
-        duration_hours <- (max(times) - min(times)) / 3600
-        sprintf("%.1f hours", duration_hours)
-      }
+      if (length(acts) < 2L) return("N/A")
+      times <- vapply(acts, function(a) as.numeric(a$timestamp), numeric(1))
+      sprintf("%.1f hours", (max(times) - min(times)) / 3600)
     })
-    
+
     output$actions_by_module <- renderPlot({
+      history_manager$version()
       summary <- history_manager$get_summary()
-      if (nrow(summary) == 0) return(NULL)
-      
+      if (!nrow(summary)) return(NULL)
       module_counts <- table(summary$module)
-      barplot(module_counts, main = "Actions by Module",
-             xlab = "Module", ylab = "Count", col = "#0d6efd")
+      barplot(module_counts, main = "Actions by Module", xlab = "Module",
+              ylab = "Count", col = "#0d6efd")
     })
-    
-    # Return history manager for external use
+
     history_manager
   })
 }
@@ -421,4 +455,4 @@ mod_analysis_history_server <- function(id, app_state, history_manager = NULL) {
 # END OF MODULE 10
 # =============================================================================
 
-message("[SAP] Analysis History v2.2-20260706 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Analysis History v2.3-20260801 loaded")  # SAP_MODULE_BANNER

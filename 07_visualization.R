@@ -58,7 +58,8 @@ theme_professional <- function(base_size = 12, palette = "Set2") {
 #' @param bins Number of bins
 #'
 #' @return ggplot2 object
-plot_distribution <- function(df, var, bins = 30) {
+plot_distribution <- function(df, var, bins = 30, var_label = NULL) {
+  var_label <- var_label %||% var
   df_clean <- df %>% filter(!is.na(!!sym(var)))
   
   ggplot(df_clean, aes(x = !!sym(var))) +
@@ -66,11 +67,11 @@ plot_distribution <- function(df, var, bins = 30) {
                    fill = "#0d6efd", alpha = 0.6, color = "white") +
     geom_density(color = "#dc3545", linewidth = 1, fill = "#dc354520", alpha = 0.3) +
     theme_professional() +
-    labs(title = paste("Distribution of", var),
+    labs(title = paste("Distribution of", var_label),
          subtitle = sprintf("N = %d, Mean = %.2f, SD = %.2f", 
                            nrow(df_clean), mean(df_clean[[var]], na.rm = TRUE),
                            sd(df_clean[[var]], na.rm = TRUE)),
-         x = var,
+         x = var_label,
          y = "Density")
 }
 
@@ -120,7 +121,9 @@ grouped_summary <- function(df, var, group_var, stats = NULL) {
   out
 }
 
-plot_violin <- function(df, var, group_var) {
+plot_violin <- function(df, var, group_var, var_label = NULL, group_label = NULL) {
+  var_label   <- var_label   %||% var
+  group_label <- group_label %||% group_var
   df_clean <- df %>%
     filter(!is.na(!!sym(var)) & !is.na(!!sym(group_var)))
 
@@ -140,10 +143,10 @@ plot_violin <- function(df, var, group_var) {
                  show.legend = FALSE) +
     scale_fill_viridis_d() +
     theme_professional() +
-    labs(title = paste(var, "by", group_var),
+    labs(title = paste(var_label, "by", group_label),
          subtitle = sprintf("Violin plot with individual points (N = %d)", nrow(df_clean)),
-         x = group_var,
-         y = var)
+         x = group_label,
+         y = var_label)
 }
 
 #' Create scatter plot with regression line
@@ -153,19 +156,21 @@ plot_violin <- function(df, var, group_var) {
 #' @param y Y variable name
 #'
 #' @return ggplot2 object
-plot_scatter_regression <- function(df, x, y) {
+plot_scatter_regression <- function(df, x, y, x_label = NULL, y_label = NULL) {
+  x_label <- x_label %||% x
+  y_label <- y_label %||% y
   df_clean <- df %>%
     filter(!is.na(!!sym(x)) & !is.na(!!sym(y)))
   
   ggplot(df_clean, aes(x = !!sym(x), y = !!sym(y))) +
     geom_point(alpha = 0.5, color = "#0d6efd", size = 2.5) +
-    geom_smooth(method = "lm", se = TRUE, color = "#dc3545", 
+    geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#dc3545", 
                fill = "#dc354520", linewidth = 1) +
     theme_professional() +
-    labs(title = paste("Relationship between", x, "and", y),
+    labs(title = paste("Relationship between", x_label, "and", y_label),
          subtitle = sprintf("Linear fit with 95%% CI (N = %d)", nrow(df_clean)),
-         x = x,
-         y = y)
+         x = x_label,
+         y = y_label)
 }
 
 #' Create correlation heatmap
@@ -216,7 +221,10 @@ plot_correlation_heatmap <- function(df, vars) {
 #' @param group_var Grouping variable
 #'
 #' @return ggplot2 object
-plot_distributions_faceted <- function(df, var, group_var) {
+plot_distributions_faceted <- function(df, var, group_var, var_label = NULL,
+                                       group_label = NULL) {
+  var_label   <- var_label   %||% var
+  group_label <- group_label %||% group_var
   df_clean <- df %>%
     filter(!is.na(!!sym(var)) & !is.na(!!sym(group_var)))
 
@@ -232,9 +240,9 @@ plot_distributions_faceted <- function(df, var, group_var) {
     scale_fill_viridis_d() +
     theme_professional() +
     theme(strip.text = element_text(size = 11, face = "bold")) +
-    labs(title = paste("Distribution of", var, "by", group_var),
+    labs(title = paste("Distribution of", var_label, "by", group_label),
          subtitle = sprintf("Faceted histograms (N = %d)", nrow(df_clean)),
-         x = var,
+         x = var_label,
          y = "Count")
 }
 
@@ -278,7 +286,7 @@ plot_residuals <- function(fit) {
     geom_point(alpha = 0.6, color = "#0d6efd", size = 2.5) +
     geom_hline(yintercept = 0, color = "#dc3545", 
               linetype = "dashed", linewidth = 1) +
-    geom_smooth(method = "loess", se = FALSE, color = "#198754", 
+    geom_smooth(method = "loess", formula = y ~ x, se = FALSE, color = "#198754", 
                linewidth = 1) +
     theme_professional() +
     labs(title = "Residual Plot",
@@ -300,7 +308,7 @@ plot_scale_location <- function(fit) {
   
   ggplot(residuals_df, aes(x = fitted, y = sqrt_std_residuals)) +
     geom_point(alpha = 0.6, color = "#0d6efd", size = 2.5) +
-    geom_smooth(method = "loess", se = FALSE, color = "#dc3545", 
+    geom_smooth(method = "loess", formula = y ~ x, se = FALSE, color = "#dc3545", 
                linewidth = 1) +
     theme_professional() +
     labs(title = "Scale-Location Plot",
@@ -354,7 +362,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
     
     ns <- session$ns
 
-    # Captures the ggplot handed to ggplotly() so "Add to Report" can
+    # Captures the ggplot handed to sap_ggplotly() so "Add to Report" can
     # re-render it to PNG. See plot_capture() in 00_services.R.
     pc <- plot_capture()
     
@@ -372,9 +380,32 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       app_state$processed_data
     })
     
+    # -----------------------------------------------------------------------
+    # Variable typing + labelling — dictionary-aware (Phase 3c, Visualization)
+    # -----------------------------------------------------------------------
+    # Same contract as Descriptive Stats (3b) and Statistical Tests (3c):
+    # dictionary is authoritative WHEN PRESENT, never blocking when absent. Here
+    # labels go further than the dropdowns — dlabel() feeds plot titles, axis
+    # labels, and legends via the *_label arguments on the plot_* functions.
+    meta_dict <- reactive({
+      if (is.null(services) || is.null(services$metadata)) return(NULL)
+      services$metadata$version()          # refresh when the dictionary changes
+      d <- services$metadata$get()
+      if (is.data.frame(d) && nrow(d) > 0) d else NULL
+    })
+
+    .num_types <- c("numeric", "integer")
+    .cat_types <- c("categorical_character", "character", "logical")
+
     numeric_cols <- reactive({
       req(data_exists())
       df <- df_data()
+      d  <- meta_dict()
+      if (!is.null(d)) {
+        v <- intersect(d$variable[d$data_type %in% .num_types], names(df))
+        v <- v[vapply(df[v], function(x) is.numeric(x) && is.null(dim(x)), logical(1))]
+        if (length(v)) return(v)
+      }
       is_num <- vapply(df, function(x) is.numeric(x) && is.null(dim(x)),
                        logical(1))
       names(df)[is_num]
@@ -383,10 +414,41 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
     categorical_cols <- reactive({
       req(data_exists())
       df <- df_data()
+      d  <- meta_dict()
+      if (!is.null(d)) {
+        v <- intersect(d$variable[d$data_type %in% .cat_types], names(df))
+        v <- v[vapply(df[v], function(x) (is.factor(x) || is.character(x)) &&
+                        is.null(dim(x)), logical(1))]
+        if (length(v)) return(v)
+      }
       is_cat <- vapply(df, function(x) (is.factor(x) || is.character(x)) &&
                          is.null(dim(x)), logical(1))
       names(df)[is_cat]
     })
+
+    # label -> variable named choices for dropdowns.
+    labelled_choices <- function(vars) {
+      if (!length(vars)) return(character(0))
+      d <- meta_dict()
+      if (is.null(d)) return(stats::setNames(vars, vars))
+      lbl <- vapply(vars, function(v) {
+        row <- d[d$variable == v, , drop = FALSE]
+        if (nrow(row) && !is.na(row$label[1]) && nzchar(row$label[1]))
+          row$label[1] else v
+      }, character(1))
+      stats::setNames(vars, lbl)
+    }
+
+    # Single variable's display label (for plot titles/axes). Falls back to the
+    # column name when no dictionary/label exists — so plots are never blank.
+    dlabel <- function(v) {
+      if (is.null(v) || !nzchar(v)) return(v)
+      d <- meta_dict()
+      if (is.null(d)) return(v)
+      row <- d[d$variable == v, , drop = FALSE]
+      if (nrow(row) && !is.na(row$label[1]) && nzchar(row$label[1]))
+        row$label[1] else v
+    }
     
     # =========================================================================
     # NO DATA MESSAGE
@@ -427,7 +489,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-8",
                     selectInput(ns("dist_var"), "Numeric variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-4 pt-3",
                     sliderInput(ns("dist_bins"), "Bins:", 
@@ -446,7 +508,9 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                   plotly::plotlyOutput(ns("dist_plot"), height = "450px"),
                   type = 8
                 ),
-                div(class = "mt-2 text-end", report_button(ns, "add_dist_plot", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                    ai_assistant_ui(ns("ai_dist")),
+                    report_button(ns, "add_dist_plot", "Add to Report"))
               )
             ),
             
@@ -473,11 +537,11 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-4",
                     selectInput(ns("comp_var"), "Numeric variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-4",
                     selectInput(ns("comp_group"), "Grouping variable:",
-                               choices = categorical_cols())
+                               choices = labelled_choices(categorical_cols()))
                   ),
                   div(class = "col-md-4",
                     selectInput(ns("comp_stat"), "Statistic (for chart):",
@@ -519,7 +583,9 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
               div(class = "card-body",
                 div(class = "table-responsive mb-3",
                     DT::DTOutput(ns("comp_summary_table")),
-                    div(class = "mt-2 text-end", report_button(ns, "add_comp_summary_table", "Add to Report"))
+                    div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                        ai_assistant_ui(ns("ai_comp")),
+                        report_button(ns, "add_comp_summary_table", "Add to Report"))
                 ),
                 withSpinner(
                   plotly::plotlyOutput(ns("comp_stat_plot"), height = "400px"),
@@ -576,11 +642,11 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-6",
                     selectInput(ns("scatter_x"), "X variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-6",
                     selectInput(ns("scatter_y"), "Y variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   )
                 )
               )
@@ -609,7 +675,9 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                   plotly::plotlyOutput(ns("corr_heatmap"), height = "500px"),
                   type = 8
                 ),
-                div(class = "mt-2 text-end", report_button(ns, "add_corr_heatmap", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                    ai_assistant_ui(ns("ai_corr")),
+                    report_button(ns, "add_corr_heatmap", "Add to Report"))
               )
             ),
             
@@ -634,7 +702,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-8",
                     selectInput(ns("qq_var"), "Variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-4", "")
                 ),
@@ -642,7 +710,9 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                   plotly::plotlyOutput(ns("qq_plot"), height = "400px"),
                   type = 8
                 ),
-                div(class = "mt-2 text-end", report_button(ns, "add_qq_plot", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                    ai_assistant_ui(ns("ai_diag")),
+                    report_button(ns, "add_qq_plot", "Add to Report"))
               )
             ),
             
@@ -654,11 +724,11 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-6",
                     selectInput(ns("diag_outcome"), "Outcome variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-6",
                     selectInput(ns("diag_predictor"), "Predictor variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   )
                 ),
                 withSpinner(
@@ -700,10 +770,12 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
                                  class = "btn-primary btn-sm")
                   ),
                   div(class = "col-md-6",
-                    h6("High-Resolution"),
-                    p("Export as high-res PNG (300 dpi)", class = "small text-muted"),
-                    downloadButton(ns("export_hires_png"), "High-Res PNG", 
-                                 class = "btn-primary btn-sm")
+                    h6("High-Resolution & Vector"),
+                    p("Export the current distribution as PNG or editable SVG", class = "small text-muted"),
+                    div(class = "d-flex gap-2",
+                      downloadButton(ns("export_hires_png"), "High-Res PNG", class = "btn-primary btn-sm"),
+                      downloadButton(ns("export_hires_svg"), "SVG", class = "btn-outline-primary btn-sm")
+                    )
                   )
                 )
               )
@@ -744,9 +816,11 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       var <- input$dist_var
       bins <- input$dist_bins
       
-      p <- plot_distribution(df_data(), var, bins = bins)
+      p <- plot_distribution(df_data(), var, bins = bins, var_label = dlabel(var))
       
-      plotly::ggplotly(pc$keep("dist_plot", p), tooltip = c("x", "y"))
+      pc$keep("dist_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     output$download_dist_png <- downloadHandler(
@@ -754,6 +828,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
         paste0(input$dist_var, "_distribution_", Sys.Date(), ".png")
       },
       content = function(file) {
+        sap_export_assert(services, "distribution plot PNG export")
         p <- plot_distribution(df_data(), input$dist_var, 
                               bins = input$dist_bins)
         ggsave(file, p, width = 10, height = 6, dpi = 300)
@@ -765,6 +840,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
         paste0(input$dist_var, "_distribution_", Sys.Date(), ".pdf")
       },
       content = function(file) {
+        sap_export_assert(services, "distribution plot PDF export")
         p <- plot_distribution(df_data(), input$dist_var, 
                               bins = input$dist_bins)
         ggsave(file, p, width = 10, height = 6, dpi = 300)
@@ -838,9 +914,13 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       req(input$comp_group)
       req(data_exists())
       
-      p <- plot_violin(df_data(), input$comp_var, input$comp_group)
+      p <- plot_violin(df_data(), input$comp_var, input$comp_group,
+                       var_label = dlabel(input$comp_var),
+                       group_label = dlabel(input$comp_group))
       
-      plotly::ggplotly(pc$keep("violin_plot", p), tooltip = c("x", "y"))
+      pc$keep("violin_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     output$facet_plot <- plotly::renderPlotly({
@@ -848,9 +928,13 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       req(input$comp_group)
       req(data_exists())
       
-      p <- plot_distributions_faceted(df_data(), input$comp_var, input$comp_group)
+      p <- plot_distributions_faceted(df_data(), input$comp_var, input$comp_group,
+                                      var_label = dlabel(input$comp_var),
+                                      group_label = dlabel(input$comp_group))
       
-      plotly::ggplotly(pc$keep("facet_plot", p), tooltip = c("x", "y"))
+      pc$keep("facet_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     output$download_comp_png <- downloadHandler(
@@ -858,6 +942,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
         paste0(input$comp_var, "_comparison_", Sys.Date(), ".png")
       },
       content = function(file) {
+        sap_export_assert(services, "comparison plot PNG export")
         p <- plot_violin(df_data(), input$comp_var, input$comp_group)
         ggsave(file, p, width = 10, height = 6, dpi = 300)
       }
@@ -872,9 +957,13 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       req(input$scatter_y)
       req(data_exists())
       
-      p <- plot_scatter_regression(df_data(), input$scatter_x, input$scatter_y)
+      p <- plot_scatter_regression(df_data(), input$scatter_x, input$scatter_y,
+                                   x_label = dlabel(input$scatter_x),
+                                   y_label = dlabel(input$scatter_y))
       
-      plotly::ggplotly(pc$keep("scatter_plot", p), tooltip = c("x", "y"))
+      pc$keep("scatter_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     output$corr_heatmap <- plotly::renderPlotly({
@@ -883,12 +972,12 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       p <- plot_correlation_heatmap(df_data(), numeric_cols())
       
       if (is.null(p)) {
-        return(plotly::plot_ly() %>%
-          plotly::add_text(x = 0.5, y = 0.5,
-                          text = "Need at least 2 numeric variables"))
+        return(sap_empty_plotly("Need at least 2 numeric variables."))
       }
       
-      plotly::ggplotly(pc$keep("corr_heatmap", p), tooltip = c("x", "y", "fill"))
+      pc$keep("corr_heatmap", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y", "fill"))
     })
     
     output$download_corr_png <- downloadHandler(
@@ -896,6 +985,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
         paste0("correlation_", Sys.Date(), ".png")
       },
       content = function(file) {
+        sap_export_assert(services, "correlation plot PNG export")
         p <- plot_scatter_regression(df_data(), input$scatter_x, input$scatter_y)
         ggsave(file, p, width = 10, height = 6, dpi = 300)
       }
@@ -912,9 +1002,11 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       var <- input$qq_var
       x <- df_data()[[var]]
       
-      p <- plot_qq(x, var)
+      p <- plot_qq(x, dlabel(var))
       
-      plotly::ggplotly(pc$keep("qq_plot", p), tooltip = c("x", "y"))
+      pc$keep("qq_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     output$residual_plot <- plotly::renderPlotly({
@@ -930,7 +1022,9 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       
       p <- plot_residuals(fit)
       
-      plotly::ggplotly(pc$keep("residual_plot", p), tooltip = c("x", "y"))
+      pc$keep("residual_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     output$scale_location_plot <- plotly::renderPlotly({
@@ -946,7 +1040,9 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
       
       p <- plot_scale_location(fit)
       
-      plotly::ggplotly(pc$keep("scale_location_plot", p), tooltip = c("x", "y"))
+      pc$keep("scale_location_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     # =========================================================================
@@ -958,22 +1054,28 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
         paste0("visualization_report_", Sys.Date(), ".pdf")
       },
       content = function(file) {
+        sap_export_assert(services, "visualization report PDF export")
         # Create multi-page PDF with all plots
         pdf(file, width = 10, height = 6)
         
         # Plot 1: Distribution
         if (!is.null(input$dist_var)) {
-          print(plot_distribution(df_data(), input$dist_var))
+          print(plot_distribution(df_data(), input$dist_var,
+                                  var_label = dlabel(input$dist_var)))
         }
         
         # Plot 2: Violin plot
         if (!is.null(input$comp_var) && !is.null(input$comp_group)) {
-          print(plot_violin(df_data(), input$comp_var, input$comp_group))
+          print(plot_violin(df_data(), input$comp_var, input$comp_group,
+                            var_label = dlabel(input$comp_var),
+                            group_label = dlabel(input$comp_group)))
         }
         
         # Plot 3: Scatter plot
         if (!is.null(input$scatter_x) && !is.null(input$scatter_y)) {
-          print(plot_scatter_regression(df_data(), input$scatter_x, input$scatter_y))
+          print(plot_scatter_regression(df_data(), input$scatter_x, input$scatter_y,
+                                        x_label = dlabel(input$scatter_x),
+                                        y_label = dlabel(input$scatter_y)))
         }
         
         dev.off()
@@ -985,12 +1087,113 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
         paste0("visualization_hires_", Sys.Date(), ".png")
       },
       content = function(file) {
+        sap_export_assert(services, "high-resolution visualization export")
         if (!is.null(input$dist_var)) {
-          p <- plot_distribution(df_data(), input$dist_var)
+          p <- plot_distribution(df_data(), input$dist_var,
+                                 var_label = dlabel(input$dist_var))
           ggsave(file, p, width = 12, height = 8, dpi = 300)
         }
       }
     )
+
+    output$export_hires_svg <- downloadHandler(
+      filename = function() paste0("visualization_vector_", Sys.Date(), ".svg"),
+      content = function(file) {
+        sap_export_assert(services, "SVG visualization export")
+        shiny::req(input$dist_var)
+        p <- plot_distribution(df_data(), input$dist_var, var_label = dlabel(input$dist_var))
+        ggsave(file, p, width = 12, height = 8, device = "svg")
+      }
+    )
+
+    # =========================================================================
+    # AI INTERPRETATION (Phase B: Visualization — one assistant per tab)
+    # Charts have no numeric result table, so each payload is a CHART SUMMARY:
+    # the chart type, the variables (as dictionary labels), and any computed
+    # statistic. No raw dataset is sent — only the description of what's plotted.
+    # =========================================================================
+    mod_ai_assistant_server(
+      "ai_dist", services,
+      payload = function() {
+        if (is.null(input$dist_var)) return(NULL)
+        v <- input$dist_var
+        stats <- tryCatch({
+          x <- df_data()[[v]]
+          x <- x[!is.na(x)]
+          sprintf("mean=%.3g, sd=%.3g, median=%.3g, n=%d",
+                  mean(x), sd(x), median(x), length(x))
+        }, error = function(e) NULL)
+        list(
+          analysis_type = "Distribution chart (histogram + density)",
+          variables = dlabel(v),
+          chart_summary = sprintf("Histogram with density overlay of %s. %s",
+                                  dlabel(v), stats %||% ""),
+          metadata = list(variable = dlabel(v))
+        )
+      })
+
+    mod_ai_assistant_server(
+      "ai_comp", services,
+      payload = function() {
+        df <- tryCatch(comp_summary_df(), error = function(e) NULL)
+        if (is.null(df) || is.null(input$comp_var) || is.null(input$comp_group))
+          return(NULL)
+        list(
+          analysis_type = "Group comparison (grouped summary + charts)",
+          variables = c(dlabel(input$comp_var), dlabel(input$comp_group)),
+          results   = df,
+          chart_summary = sprintf("%s compared across levels of %s (violin, faceted, and bar views).",
+                                  dlabel(input$comp_var), dlabel(input$comp_group)),
+          metadata = list(outcome = dlabel(input$comp_var),
+                          grouping = dlabel(input$comp_group))
+        )
+      })
+
+    mod_ai_assistant_server(
+      "ai_corr", services,
+      payload = function() {
+        vars <- tryCatch(numeric_cols(), error = function(e) NULL)
+        if (is.null(vars) || length(vars) < 2) return(NULL)
+        cs <- tryCatch({
+          df_numeric <- df_data()[, vars, drop = FALSE]
+          m <- cor(df_numeric, use = "complete.obs")
+          # strongest off-diagonal pair
+          m2 <- m; diag(m2) <- NA
+          idx <- which(abs(m2) == max(abs(m2), na.rm = TRUE), arr.ind = TRUE)[1, ]
+          sprintf("Strongest correlation: %s vs %s, r = %.2f",
+                  dlabel(rownames(m)[idx[1]]), dlabel(colnames(m)[idx[2]]),
+                  m[idx[1], idx[2]])
+        }, error = function(e) NULL)
+        list(
+          analysis_type = "Correlation matrix",
+          variables = vapply(vars, dlabel, character(1)),
+          chart_summary = sprintf("Correlation heatmap of %d numeric variables. %s",
+                                  length(vars), cs %||% ""),
+          metadata = list(n_variables = length(vars))
+        )
+      })
+
+    mod_ai_assistant_server(
+      "ai_diag", services,
+      payload = function() {
+        if (is.null(input$qq_var)) return(NULL)
+        v <- input$qq_var
+        sw <- tryCatch({
+          x <- df_data()[[v]]; x <- x[!is.na(x)]
+          if (length(x) >= 3 && length(x) <= 5000) {
+            t <- shapiro.test(x)
+            sprintf("Shapiro-Wilk W=%.3f, p=%.4g", t$statistic, t$p.value)
+          } else "Shapiro-Wilk not run (n out of range)"
+        }, error = function(e) NULL)
+        list(
+          analysis_type = "Normality diagnostics (Q-Q plot)",
+          variables = dlabel(v),
+          chart_summary = sprintf("Q-Q plot assessing normality of %s. %s",
+                                  dlabel(v), sw %||% ""),
+          assumptions = "Points near the diagonal indicate approximate normality",
+          metadata = list(variable = dlabel(v))
+        )
+      })
 
     # =========================================================================
     # ADD TO REPORT
@@ -1000,7 +1203,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
 
     register_report_button(
       input, services, "add_dist_plot", kind = "plot",
-      title   = function() paste("Distribution of", input$dist_var),
+      title   = function() paste("Distribution of", dlabel(input$dist_var)),
       payload = pc$get("dist_plot"),
       code    = function() sprintf(
         'ggplot(df, aes(x = %s)) +\n  geom_histogram(bins = %s) +\n  theme_minimal()',
@@ -1008,7 +1211,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
 
     register_report_button(
       input, services, "add_comp_summary_table", kind = "table",
-      title   = function() sprintf("Summary of %s by %s", input$comp_var, input$comp_group),
+      title   = function() sprintf("Summary of %s by %s", dlabel(input$comp_var), dlabel(input$comp_group)),
       payload = function() comp_summary_df(),
       code    = function() sprintf(
         'df %%>%%\n  group_by(%s) %%>%%\n  summarise(across(%s, list(mean = mean, sd = sd, n = length), na.rm = TRUE))',
@@ -1017,7 +1220,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
     register_report_button(
       input, services, "add_comp_stat_plot", kind = "plot",
       title   = function() sprintf("%s of %s by %s",
-                                   input$comp_stat, input$comp_var, input$comp_group),
+                                   input$comp_stat, dlabel(input$comp_var), dlabel(input$comp_group)),
       payload = pc$get("comp_stat_plot"),
       code    = function() sprintf(
         'df %%>%%\n  group_by(%s) %%>%%\n  summarise(stat = %s(%s, na.rm = TRUE)) %%>%%\n  ggplot(aes(x = reorder(%s, -stat), y = stat)) + geom_col()',
@@ -1025,7 +1228,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
 
     register_report_button(
       input, services, "add_violin_plot", kind = "plot",
-      title   = function() sprintf("Violin: %s by %s", input$comp_var, input$comp_group),
+      title   = function() sprintf("Violin: %s by %s", dlabel(input$comp_var), dlabel(input$comp_group)),
       payload = pc$get("violin_plot"),
       code    = function() sprintf(
         'ggplot(df, aes(x = %s, y = %s, fill = %s)) +\n  geom_violin() + geom_boxplot(width = 0.1)',
@@ -1034,7 +1237,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
     register_report_button(
       input, services, "add_facet_plot", kind = "plot",
       title   = function() sprintf("Faceted distribution: %s by %s",
-                                   input$comp_var, input$comp_group),
+                                   dlabel(input$comp_var), dlabel(input$comp_group)),
       payload = pc$get("facet_plot"),
       code    = function() sprintf(
         'ggplot(df, aes(x = %s)) +\n  geom_histogram() +\n  facet_wrap(~ %s)',
@@ -1042,7 +1245,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
 
     register_report_button(
       input, services, "add_scatter_plot", kind = "plot",
-      title   = function() sprintf("%s vs %s", input$scatter_y, input$scatter_x),
+      title   = function() sprintf("%s vs %s", dlabel(input$scatter_y), dlabel(input$scatter_x)),
       payload = pc$get("scatter_plot"),
       code    = function() sprintf(
         'ggplot(df, aes(x = %s, y = %s)) +\n  geom_point(alpha = 0.6) +\n  geom_smooth(method = "lm")',
@@ -1058,7 +1261,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
 
     register_report_button(
       input, services, "add_qq_plot", kind = "plot",
-      title   = function() paste("Q-Q plot:", input$qq_var),
+      title   = function() paste("Q-Q plot:", dlabel(input$qq_var)),
       payload = pc$get("qq_plot"),
       code    = function() sprintf('qqnorm(df$%s); qqline(df$%s)',
                                    input$qq_var, input$qq_var))
@@ -1066,7 +1269,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
     register_report_button(
       input, services, "add_residual_plot", kind = "plot",
       title   = function() sprintf("Residuals vs fitted: %s ~ %s",
-                                   input$diag_outcome, input$diag_predictor),
+                                   dlabel(input$diag_outcome), dlabel(input$diag_predictor)),
       payload = pc$get("residual_plot"),
       code    = function() sprintf('fit <- lm(%s ~ %s, data = df)\nplot(fit, which = 1)',
                                    input$diag_outcome, input$diag_predictor))
@@ -1074,7 +1277,7 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
     register_report_button(
       input, services, "add_scale_location_plot", kind = "plot",
       title   = function() sprintf("Scale-location: %s ~ %s",
-                                   input$diag_outcome, input$diag_predictor),
+                                   dlabel(input$diag_outcome), dlabel(input$diag_predictor)),
       payload = pc$get("scale_location_plot"),
       code    = function() sprintf('fit <- lm(%s ~ %s, data = df)\nplot(fit, which = 3)',
                                    input$diag_outcome, input$diag_predictor))
@@ -1086,4 +1289,4 @@ mod_visualization_server <- function(id, app_state, services = NULL) {
 # END OF MODULE 7: VISUALIZATION
 # =============================================================================
 
-message("[SAP] Visualization v2.7-20260708 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Visualization v2.9-20260709 loaded")  # SAP_MODULE_BANNER

@@ -127,7 +127,9 @@ mod_data_explorer_ui <- function(id) {
             class = "table-responsive",
             style = "max-height: 600px; overflow: auto;",
             DT::dataTableOutput(ns("data_table"), height = "100%"),
-            div(class = "mt-2 text-end", report_button(ns, "add_dataset_overview", "Add dataset overview"))
+            div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                ai_assistant_ui(ns("ai_overview")),
+                report_button(ns, "add_dataset_overview", "Add dataset overview"))
           )
         )
       ),
@@ -169,7 +171,9 @@ mod_data_explorer_ui <- function(id) {
               div(
                 class = "table-responsive",
                 DT::dataTableOutput(ns("missing_table")),
-                div(class = "mt-2 text-end", report_button(ns, "add_missing_table", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                    ai_assistant_ui(ns("ai_missing")),
+                    report_button(ns, "add_missing_table", "Add to Report"))
               )
             )
           ),
@@ -187,6 +191,33 @@ mod_data_explorer_ui <- function(id) {
               class = "card-body",
               plotly::plotlyOutput(ns("missing_heatmap"), height = "420px"),
               div(class = "mt-2 text-end", report_button(ns, "add_missing_heatmap", "Add to Report"))
+            )
+          )
+        )
+      ),
+
+      nav_panel(
+        "Data Dictionary",
+        icon = icon("book"),
+        div(
+          class = "p-4",
+          div(class = "d-flex justify-content-between align-items-center mb-3",
+            div(
+              h5(class = "mb-0", "Variable Dictionary"),
+              span(class = "text-muted small",
+                   "Metadata catalogued at import. Edit a cell to override; changes persist to the project.")
+            ),
+            div(
+              actionButton(ns("dict_redetect"), "Re-detect types",
+                           icon = icon("wand-magic-sparkles"),
+                           class = "btn btn-sm btn-outline-secondary me-1"),
+              report_button(ns, "add_dictionary", "Add to Report")
+            )
+          ),
+          div(
+            class = "card",
+            div(class = "card-body",
+              DT::DTOutput(ns("dictionary_table"))
             )
           )
         )
@@ -335,41 +366,48 @@ mod_data_explorer_server <- function(id, app_state, services = NULL) {
           action_text = "← Go to Import"
         ))
       }
-      var_df <- var_types()
+      # Derive overview metadata from the active frame. Imported metadata can
+      # temporarily be NULL or stale immediately after cleaning/import.
+      var_df <- explorer_var_table()
       
       # Calculate statistics
       n_rows <- nrow(df)
       n_cols <- ncol(df)
-      n_numeric <- sum(var_df$type %in% c("numeric", "integer"))
-      n_categorical <- sum(var_df$type %in% c("factor", "categorical_character", "logical"))
-      n_character <- sum(var_df$type == "character")
+      n_numeric <- sum(var_df$type %in% c("numeric", "integer"), na.rm = TRUE)
+      categorical_character <- var_df$type == "character" & var_df$unique_values <= 20L
+      n_categorical <- sum(var_df$type %in% c("factor", "logical") | categorical_character, na.rm = TRUE)
+      n_character <- sum(var_df$type == "character" & !categorical_character, na.rm = TRUE)
       n_date <- sum(var_df$type %in% c("date", "datetime"))
-      pct_missing <- round(sum(is.na(df)) / (n_rows * n_cols) * 100, 2)
+      pct_missing <- if (n_rows > 0L && n_cols > 0L) {
+        round(sum(is.na(df)) / (n_rows * n_cols) * 100, 2)
+      } else {
+        0
+      }
       n_duplicates <- sum(duplicated(df))
       n_dup_cols <- length(names(df)[duplicated(names(df))])
       mem_size <- format(object.size(df), units = "auto")
       
       # Calculate complete cases
       n_complete <- sum(complete.cases(df))
-      pct_complete <- round(n_complete / n_rows * 100, 2)
+      pct_complete <- if (n_rows > 0L) round(n_complete / n_rows * 100, 2) else 0
       
       tagList(
         # Main KPI Cards
         div(
-          class = "row mb-4",
-          div(class = "col-md-3", 
+          class = "row g-3 mb-4 sap-explorer-kpi-row",
+          div(class = "col-12 col-sm-6 col-xl-3", 
             kpi_card("Rows", format(n_rows, big.mark = ","), 
-                    subtitle = "observations", color = "primary")),
-          div(class = "col-md-3",
+                    subtitle = "observations", icon = "users", color = "primary")),
+          div(class = "col-12 col-sm-6 col-xl-3",
             kpi_card("Columns", n_cols, 
-                    subtitle = "variables", color = "success")),
-          div(class = "col-md-3",
+                    subtitle = "variables", icon = "table-columns", color = "success")),
+          div(class = "col-12 col-sm-6 col-xl-3",
             kpi_card("Complete", paste0(pct_complete, "%"), 
                     subtitle = sprintf("%s cases", format(n_complete, big.mark = ",")), 
-                    color = "info")),
-          div(class = "col-md-3",
+                    icon = "circle-check", color = "info")),
+          div(class = "col-12 col-sm-6 col-xl-3",
             kpi_card("Memory", mem_size, 
-                    subtitle = "estimated usage", color = "warning"))
+                    subtitle = "estimated usage", icon = "memory", color = "warning"))
         ),
         
         # Variable Type Distribution
@@ -636,7 +674,8 @@ mod_data_explorer_server <- function(id, app_state, services = NULL) {
         paste0("data_export_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
       },
       content = function(file) {
-        write.csv(df_data(), file, row.names = FALSE)
+        safe <- if (!is.null(services) && !is.null(services$privacy)) services$privacy$prepare_export(df_data(), "Data Explorer export") else df_data()
+        write.csv(safe, file, row.names = FALSE)
       }
     )
     
@@ -653,7 +692,7 @@ mod_data_explorer_server <- function(id, app_state, services = NULL) {
       }
       n_missing_total <- sum(is.na(df))
       n_cells <- nrow(df) * ncol(df)
-      pct_missing <- round(n_missing_total / n_cells * 100, 2)
+      pct_missing <- if (n_cells > 0L) round(n_missing_total / n_cells * 100, 2) else 0
       
       div(
         h6("Total Missing Values"),
@@ -685,7 +724,7 @@ mod_data_explorer_server <- function(id, app_state, services = NULL) {
         return(div(h6("No Data"), h3("—")))
       }
       n_rows_complete <- sum(complete.cases(df))
-      pct_complete <- round(n_rows_complete / nrow(df) * 100, 2)
+      pct_complete <- if (nrow(df) > 0L) round(n_rows_complete / nrow(df) * 100, 2) else 0
       
       div(
         h6("Complete Cases"),
@@ -702,7 +741,7 @@ mod_data_explorer_server <- function(id, app_state, services = NULL) {
       out <- data.frame(
         Variable = names(df),
         Missing = colSums(is.na(df)),
-        "Missing %" = round(colSums(is.na(df)) / nrow(df) * 100, 2),
+        "Missing %" = round(colSums(is.na(df)) / max(1L, nrow(df)) * 100, 2),
         Type = vapply(df, function(x) class(x)[1], character(1)),
         check.names = FALSE
       ) %>%
@@ -826,8 +865,112 @@ mod_data_explorer_server <- function(id, app_state, services = NULL) {
     })
 
     # =========================================================================
+    # DATA DICTIONARY (Metadata Engine viewer/editor)
+    # =========================================================================
+
+    # The columns we show and allow editing. Detected/count columns are
+    # read-only; the descriptive ones are user-editable.
+    dict_display_cols <- c("variable", "label", "description", "units",
+                           "data_type", "measurement_level", "survey_role",
+                           "default_chart", "default_test",
+                           "n_missing", "n_unique")
+    dict_editable <- c("label", "description", "units", "measurement_level",
+                       "survey_role", "default_chart", "default_test")
+
+    dictionary_df <- reactive({
+      if (is.null(services) || is.null(services$metadata)) return(data.frame())
+      services$metadata$version()             # refresh on populate/edit
+      d <- services$metadata$get()
+      if (!nrow(d)) return(data.frame())
+      keep <- intersect(dict_display_cols, names(d))
+      d[, keep, drop = FALSE]
+    })
+
+    output$dictionary_table <- DT::renderDT({
+      d <- dictionary_df()
+      req(nrow(d) > 0)
+      editable_idx <- which(names(d) %in% dict_editable)
+      DT::datatable(
+        d,
+        rownames = FALSE,
+        selection = "none",
+        editable = list(target = "cell",
+                        disable = list(columns = setdiff(seq_len(ncol(d)) - 1,
+                                                          editable_idx - 1))),
+        options = list(pageLength = 25, scrollX = TRUE, dom = "tp")
+      )
+    })
+
+    # Persist an inline edit back to the dictionary.
+    observeEvent(input$dictionary_table_cell_edit, {
+      info <- input$dictionary_table_cell_edit
+      d <- dictionary_df(); req(nrow(d) > 0)
+      col_name <- names(d)[info$col + 1]      # DT columns are 0-indexed
+      if (!col_name %in% dict_editable) return(invisible(NULL))
+      var_name <- d$variable[info$row]
+      fields <- list(); fields[[col_name]] <- info$value
+      ok <- services$metadata$update_variable(var_name, fields)
+      if (ok && !is.null(services$notify)) {
+        services$notify$success(sprintf("Updated %s for '%s'", col_name, var_name))
+      }
+    }, ignoreInit = TRUE)
+
+    # Re-detect types from the current dataset (refreshes types/counts, keeps
+    # user labels).
+    observeEvent(input$dict_redetect, {
+      if (is.null(services) || is.null(services$metadata)) return(invisible(NULL))
+      df <- if (!is.null(services$data)) services$data$get("processed") else df_data()
+      if (!is.data.frame(df)) {
+        if (!is.null(services$notify)) services$notify$warning("No dataset to catalogue.")
+        return(invisible(NULL))
+      }
+      n <- services$metadata$populate(df)
+      if (!is.null(services$notify))
+        services$notify$success(sprintf("Catalogued %d variables.", n))
+    }, ignoreInit = TRUE)
+
+    # =========================================================================
+    # AI INTERPRETATION (Phase B: Data Explorer — data quality)
+    # Anchors: dataset overview and missing-value analysis. Payloads are the
+    # structured summary/missing tables — not the data itself.
+    # =========================================================================
+    mod_ai_assistant_server(
+      "ai_overview", services,
+      payload = function() {
+        df <- tryCatch(dataset_overview_df(), error = function(e) NULL)
+        if (is.null(df)) return(NULL)
+        list(
+          analysis_type = "Dataset overview / data quality report",
+          results = df,
+          metadata = list(source = "data explorer overview")
+        )
+      },
+      default_style = "Executive Summary")
+
+    mod_ai_assistant_server(
+      "ai_missing", services,
+      payload = function() {
+        df <- tryCatch(missing_df(), error = function(e) NULL)
+        if (is.null(df) || nrow(df) == 0) return(NULL)
+        list(
+          analysis_type = "Missing value analysis",
+          results = df,
+          metadata = list(variables_with_missing = nrow(df))
+        )
+      })
+
+    # =========================================================================
     # ADD TO REPORT
     # =========================================================================
+
+    register_report_button(
+      input, services, "add_dictionary", kind = "table",
+      title   = "Data dictionary",
+      payload = function() {
+        d <- dictionary_df()
+        if (!nrow(d)) NULL else d
+      },
+      code    = "# Variable dictionary from the Metadata Engine")
 
     register_report_button(
       input, services, "add_dataset_overview", kind = "table",
@@ -858,10 +1001,13 @@ mod_data_explorer_server <- function(id, app_state, services = NULL) {
 render_numeric_inspector <- function(ns, var_name, col_data, var_type) {
   
   col_clean <- col_data[!is.na(col_data)]
-  
-  # Calculate statistics
   n_missing <- sum(is.na(col_data))
   n_obs <- length(col_clean)
+  if (n_obs == 0L) {
+    return(sap_no_data(paste0("'", var_name, "' contains only missing numeric values.")))
+  }
+  
+  # Calculate statistics
   mean_val <- mean(col_clean)
   median_val <- median(col_clean)
   sd_val <- sd(col_clean)
@@ -976,6 +1122,9 @@ render_categorical_inspector <- function(ns, var_name, col_data, var_type) {
   n_missing <- sum(is.na(col_data))
   n_obs <- length(col_clean)
   n_unique <- n_distinct(col_clean)
+  if (n_obs == 0L) {
+    return(sap_no_data(paste0("'", var_name, "' contains only missing values.")))
+  }
   
   # Frequency table
   freq_table <- data.frame(
@@ -1073,6 +1222,9 @@ render_date_inspector <- function(ns, var_name, col_data, var_type) {
   col_clean <- col_data[!is.na(col_data)]
   n_missing <- sum(is.na(col_data))
   n_obs <- length(col_clean)
+  if (n_obs == 0L) {
+    return(sap_no_data(paste0("'", var_name, "' contains only missing dates.")))
+  }
   
   # Date statistics
   min_date <- min(col_clean)
@@ -1149,6 +1301,9 @@ render_character_inspector <- function(ns, var_name, col_data, var_type) {
   n_missing <- sum(is.na(col_data))
   n_obs <- length(col_clean)
   n_unique <- n_distinct(col_clean)
+  if (n_obs == 0L) {
+    return(sap_no_data(paste0("'", var_name, "' contains only missing text values.")))
+  }
   
   # String statistics
   str_lengths <- nchar(col_clean)
@@ -1227,4 +1382,4 @@ render_unknown_inspector <- function(ns, var_name, col_data, var_type) {
 # =============================================================================
 # =============================================================================
 
-message("[SAP] Data Explorer v2.4-20260708 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Data Explorer v2.6-20260709 loaded")  # SAP_MODULE_BANNER

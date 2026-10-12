@@ -1,5 +1,5 @@
 # =============================================================================
-# SURVEY ANALYTICS PLATFORM - Global Configuration & Utilities
+# NEXUS STUDIO - Global Configuration & Utilities
 # VERSION: Alternative (WITHOUT gtsummary dependency)
 # =============================================================================
 # This version uses 'gt' instead of 'gtsummary' for summary tables
@@ -30,6 +30,12 @@ library(broom)
 library(officer)
 library(rmarkdown)
 library(shinycssloaders)
+# Password hashing for the authentication layer (Phase 2). sodium provides
+# password_store()/password_verify() (argon2) — purpose-built for credentials.
+suppressWarnings(suppressMessages({
+  .sap_has_sodium <- requireNamespace("sodium", quietly = TRUE)
+}))
+if (.sap_has_sodium) library(sodium)
 
 # =============================================================================
 # RUNTIME LIMITS
@@ -47,8 +53,11 @@ library(shinycssloaders)
 # is ~1.6 GB before any copy. Raising this option does not create RAM.
 # =============================================================================
 
+.sap_upload_env <- suppressWarnings(as.numeric(Sys.getenv("SAP_MAX_UPLOAD_MB", "100")))
+if (!is.finite(.sap_upload_env) || .sap_upload_env < 1) .sap_upload_env <- 100
 options(shiny.maxRequestSize =
-          getOption("sap.max_upload_mb", 2048) * 1024^2)   # default 2 GB
+          getOption("sap.max_upload_mb", .sap_upload_env) * 1024^2)   # safe default; override deliberately
+rm(.sap_upload_env)
 
 #' Human-readable current upload cap, for UI hints.
 sap_max_upload_label <- function() {
@@ -64,23 +73,23 @@ create_app_theme <- function(mode = "light") {
   if (mode == "dark") {
     bs_theme(
       preset = "darkly",
-      primary = "#1f77b4",
-      secondary = "#ff7f0e",
-      success = "#2ca02c",
-      warning = "#ff9800",
-      danger = "#d62728",
-      info = "#17a2b8",
+      primary = "#7777ee",
+      secondary = "#14b8a6",
+      success = "#22c55e",
+      warning = "#f59e0b",
+      danger = "#fb7185",
+      info = "#38bdf8",
       font_scale = 1.0
     )
   } else {
     bs_theme(
       preset = "bootstrap",
-      primary = "#0d6efd",
-      secondary = "#6c757d",
-      success = "#198754",
-      warning = "#ffc107",
-      danger = "#dc3545",
-      info = "#0dcaf0",
+      primary = "#5b5bd6",
+      secondary = "#64748b",
+      success = "#14b8a6",
+      warning = "#f59e0b",
+      danger = "#e11d48",
+      info = "#0ea5e9",
       font_scale = 1.0
     )
   }
@@ -90,14 +99,46 @@ create_app_theme <- function(mode = "light") {
 # DEFAULT GLOBAL SETTINGS
 # =============================================================================
 
+.sap_hosted_runtime <- nzchar(trimws(Sys.getenv("PORT", ""))) ||
+  nzchar(Sys.getenv("POSIT_PRODUCT", "")) ||
+  nzchar(Sys.getenv("CONNECT_SERVER", "")) ||
+  tolower(Sys.getenv("R_CONFIG_ACTIVE", "")) %in% c("shinyapps", "connect_cloud")
+.sap_default_ollama_url <- trimws(Sys.getenv(
+  "OLLAMA_BASE_URL",
+  if (.sap_hosted_runtime) "" else "http://localhost:11434"
+))
+.sap_default_ai_provider <- trimws(Sys.getenv("SAP_AI_PROVIDER", "ollama"))
+if (!nzchar(.sap_default_ai_provider)) .sap_default_ai_provider <- "ollama"
+
 DEFAULT_SETTINGS <- list(
   theme_mode = "light",
+  accent_color = "blue",
+  interface_density = "comfortable",
+  font_scale = 1.0,
   decimal_places = 3,
   confidence_level = 0.95,
   significance_level = 0.05,
+  correlation_method = "auto",
   missing_value_labels = c("NA", "N/A", "", "NULL", "99", "999", "-99"),
-  date_formats = c("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d"),
-  max_file_size = 100  # MB
+  imp_clean_names = TRUE,
+  imp_detect_dates = TRUE,
+  imp_trim = TRUE,
+  imp_encoding = "UTF-8",
+  ml_split = 0.8,
+  random_seed = 123L,
+  ml_autosave = FALSE,
+  max_file_size = 100,  # MB
+  # AI interpretation engine. Ollama is the default so interpretations are
+  # real, local, and private without requiring an API key. The model can be
+  # discovered from the installed Ollama models in Settings.
+  ai_provider = .sap_default_ai_provider,
+  ai_model = trimws(Sys.getenv("OLLAMA_MODEL", "")),
+  ai_base_url = .sap_default_ollama_url,
+  ai_temperature = 0.2,
+  ai_max_tokens = 1200,
+  ai_timeout = 300,
+  ai_context_window = 4096,
+  ai_keep_alive = "10m"
 )
 
 # =============================================================================
@@ -181,6 +222,48 @@ detect_variable_types <- function(df) {
   }
   
   return(result)
+}
+
+#' Infer survey-specific semantic roles without changing the base storage type.
+#' These roles feed the codebook and can always be overridden by the analyst.
+infer_survey_roles <- function(df) {
+  if (!is.data.frame(df)) return(character())
+  roles <- stats::setNames(rep("measure", ncol(df)), names(df))
+  n <- nrow(df)
+  for (name in names(df)) {
+    x <- df[[name]]
+    key <- tolower(name)
+    nonmissing <- x[!is.na(x)]
+    unique_n <- length(unique(nonmissing))
+    unique_ratio <- if (n > 0) unique_n / n else 0
+
+    if (grepl("(^|_)(weight|wgt|final_weight|sample_weight)(_|$)", key)) {
+      roles[[name]] <- "weight"
+    } else if (grepl("(^|_)(lat|latitude|lon|lng|longitude)(_|$)", key) ||
+               grepl("(^|_)(country|province|state|region|district|county|sector|cell|village)(_|$)", key)) {
+      roles[[name]] <- "geographic"
+    } else if (grepl("(^|_)(id|uuid|guid|respondent_id|case_id|record_id)(_|$)", key) ||
+               (unique_ratio >= 0.98 && unique_n > 20 && !is.numeric(x))) {
+      roles[[name]] <- "identifier"
+    } else if (grepl("(^|_)(mr|multi|multiple|option|select|choice)[0-9_]*($|_)", key) && unique_n <= 2) {
+      roles[[name]] <- "multiple_response_option"
+    } else if (inherits(x, "Date") || inherits(x, "POSIXt")) {
+      roles[[name]] <- "date"
+    } else if (unique_n == 2) {
+      roles[[name]] <- "binary"
+    } else if (is.numeric(x) && unique_n >= 3 && unique_n <= 7 &&
+               all(abs(nonmissing - round(nonmissing)) < .Machine$double.eps^0.5, na.rm = TRUE) &&
+               diff(range(nonmissing, na.rm = TRUE)) <= 6) {
+      roles[[name]] <- "likert"
+    } else if (is.character(x) && (unique_n > 30 || unique_ratio > 0.5)) {
+      roles[[name]] <- "free_text"
+    } else if (is.factor(x) || is.character(x) || is.logical(x)) {
+      roles[[name]] <- "categorical"
+    } else {
+      roles[[name]] <- "measure"
+    }
+  }
+  roles
 }
 
 #' Clean column names and optionally clean the data
@@ -304,25 +387,31 @@ validate_data <- function(df) {
 #'
 #' @return HTML output
 kpi_card <- function(title, value, subtitle = NULL, icon = NULL, color = "primary") {
-  
-  card_class <- paste0("bg-", color)
-  
+  allowed_colors <- c("primary", "success", "info", "warning", "danger", "secondary")
+  color <- if (color %in% allowed_colors) color else "primary"
+  display_value <- if (is.null(value) || !length(value) || is.na(value[[1]])) {
+    "—"
+  } else {
+    as.character(value[[1]])
+  }
+
   div(
-    class = paste0("card ", card_class, " text-white mb-3"),
-    style = "height: 150px;",
+    class = paste("card sap-kpi-card", paste0("sap-kpi-card-", color), "mb-3"),
+    role = "group",
+    `aria-label` = paste(title, display_value),
     div(
-      class = "card-body",
+      class = "card-body sap-kpi-card-body",
       div(
         class = "d-flex justify-content-between align-items-center",
         div(
-          h6(class = "card-title", title),
-          h3(class = "card-text", value),
-          if (!is.null(subtitle)) p(class = "small", subtitle) else NULL
+          h6(class = "card-title sap-kpi-card-title", title),
+          h3(class = "card-text sap-kpi-card-value", display_value),
+          if (!is.null(subtitle)) p(class = "small sap-kpi-card-subtitle", subtitle) else NULL
         ),
         if (!is.null(icon)) {
           div(
-            style = "font-size: 2rem; opacity: 0.5;",
-            icon(icon)
+            class = "sap-kpi-card-icon",
+            shiny::icon(icon)
           )
         }
       )
@@ -348,11 +437,11 @@ validation_box <- function(type = "info", title = NULL, message = "") {
   )
   
   icon_name <- switch(type,
-    "success" = "check-circle-fill",
-    "warning" = "exclamation-triangle-fill",
-    "error" = "exclamation-circle-fill",
-    "info" = "info-circle-fill",
-    "info-circle-fill"
+    "success" = "circle-check",
+    "warning" = "triangle-exclamation",
+    "error" = "circle-exclamation",
+    "info" = "circle-info",
+    "circle-info"
   )
   
   div(
@@ -1050,4 +1139,4 @@ summarize_quality_issues <- function(df, quality_score) {
 print("✓ Global configuration loaded successfully (gtsummary-free version)")
 # =============================================================================
 
-message("[SAP] Global utilities v2.4-20260709 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Global utilities v2.7-20260709 loaded")  # SAP_MODULE_BANNER

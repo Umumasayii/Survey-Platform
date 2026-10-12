@@ -256,7 +256,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
     
     ns <- session$ns
 
-    # Captures the ggplot handed to ggplotly() so "Add to Report" can
+    # Captures the ggplot handed to sap_ggplotly() so "Add to Report" can
     # re-render it to PNG. See plot_capture() in 00_services.R.
     pc <- plot_capture()
     
@@ -275,15 +275,75 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
     })
     
     # Get column types
+    # -----------------------------------------------------------------------
+    # Variable typing + labelling — dictionary-aware (Phase 3b)
+    # -----------------------------------------------------------------------
+    # The Metadata Engine is authoritative WHEN PRESENT, and never blocking when
+    # absent. If the current project has a dictionary, we trust its data_type to
+    # classify variables and its labels to name the dropdowns; otherwise we fall
+    # back to live derivation off the data frame, so a dataset loaded outside the
+    # import wizard still works. This is the pattern 3c/3d will reuse.
+    meta_dict <- reactive({
+      if (is.null(services) || is.null(services$metadata)) return(NULL)
+      services$metadata$version()          # refresh when the dictionary changes
+      d <- services$metadata$get()
+      if (is.data.frame(d) && nrow(d) > 0) d else NULL
+    })
+
+    # Dictionary data_type values that behave as numeric vs categorical.
+    .num_types <- c("numeric", "integer")
+    .cat_types <- c("categorical_character", "character", "logical")
+
     numeric_cols <- reactive({
       req(data_exists())
-      names(df_data())[sapply(df_data(), is.numeric)]
+      df <- df_data()
+      d  <- meta_dict()
+      if (!is.null(d)) {
+        # dictionary vars that are (a) numeric-typed and (b) still in the data
+        v <- d$variable[d$data_type %in% .num_types]
+        v <- intersect(v, names(df))
+        if (length(v)) return(v)
+      }
+      names(df)[vapply(df, is.numeric, logical(1))]
     })
-    
+
     categorical_cols <- reactive({
       req(data_exists())
-      names(df_data())[sapply(df_data(), function(x) is.factor(x) || is.character(x))]
+      df <- df_data()
+      d  <- meta_dict()
+      if (!is.null(d)) {
+        v <- d$variable[d$data_type %in% .cat_types]
+        v <- intersect(v, names(df))
+        if (length(v)) return(v)
+      }
+      names(df)[vapply(df, function(x) is.factor(x) || is.character(x), logical(1))]
     })
+
+    # Turn a character vector of variable names into NAMED choices
+    # (label -> variable) so dropdowns display human labels but still return the
+    # column name as the value. Falls back to the name when no label is stored.
+    labelled_choices <- function(vars) {
+      if (!length(vars)) return(character(0))
+      d <- meta_dict()
+      if (is.null(d)) return(stats::setNames(vars, vars))
+      lbl <- vapply(vars, function(v) {
+        row <- d[d$variable == v, , drop = FALSE]
+        if (nrow(row) && !is.na(row$label[1]) && nzchar(row$label[1]))
+          row$label[1] else v
+      }, character(1))
+      stats::setNames(vars, lbl)
+    }
+
+    # Single variable's display label (for AI payloads / titles). Falls back to
+    # the column name when no dictionary/label exists.
+    dlabel <- function(v) {
+      if (is.null(v) || !nzchar(v)) return(v)
+      d <- meta_dict()
+      if (is.null(d)) return(v)
+      row <- d[d$variable == v, , drop = FALSE]
+      if (nrow(row) && !is.na(row$label[1]) && nzchar(row$label[1]))
+        row$label[1] else v
+    }
     
     # =========================================================================
     # NO DATA MESSAGE
@@ -323,7 +383,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                   class = "row",
                   div(class = "col-md-8",
                     selectInput(ns("cont_var"), "Select numeric variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-4 pt-3",
                     actionButton(ns("btn_norm_test"), "Normality Test", 
@@ -338,9 +398,9 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
               class = "card mb-4",
               div(class = "card-header d-flex justify-content-between align-items-center",
                   h5(class = "mb-0", "Summary Statistics"),
-                  actionButton(ns("add_summary_to_report"), "Add to Report",
-                               class = "btn btn-sm btn-success",
-                               icon = icon("plus"))),
+                  div(class = "d-flex gap-2 align-items-center",
+                      ai_assistant_ui(ns("ai_cont")),
+                      report_button(ns, "add_summary_to_report", "Send to Report"))),
               div(class = "card-body",
                 withSpinner(
                   DTOutput(ns("cont_summary_table")),
@@ -352,7 +412,9 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
             
             # Normality test result
             uiOutput(ns("normality_result")),
-            div(class = "mt-2 text-end", report_button(ns, "add_normality", "Add to Report")),
+            div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                ai_assistant_ui(ns("ai_normality")),
+                report_button(ns, "add_normality", "Add to Report")),
             
             # Visualizations
             div(
@@ -365,7 +427,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                       plotly::plotlyOutput(ns("cont_histogram"), height = "300px"),
                       type = 8
                     ),
-                    div(class = "mt-2 text-end", report_button(ns, "add_cont_histogram", "Add to Report"))
+                    div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_histogram")), report_button(ns, "add_cont_histogram", "Add to Report"))
                   )
                 )
               ),
@@ -377,7 +439,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                       plotly::plotlyOutput(ns("cont_boxplot"), height = "300px"),
                       type = 8
                     ),
-                    div(class = "mt-2 text-end", report_button(ns, "add_cont_boxplot", "Add to Report"))
+                    div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_boxplot")), report_button(ns, "add_cont_boxplot", "Add to Report"))
                   )
                 )
               )
@@ -404,7 +466,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
               div(class = "card-header", h5("Variable Selection")),
               div(class = "card-body",
                 selectInput(ns("cat_var"), "Select categorical variable:",
-                           choices = categorical_cols())
+                           choices = labelled_choices(categorical_cols()))
               )
             ),
             
@@ -418,7 +480,9 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                   type = 8,
                   color = "#0d6efd"
                 ),
-                div(class = "mt-2 text-end", report_button(ns, "add_cat_freq_table", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                    ai_assistant_ui(ns("ai_cat")),
+                    report_button(ns, "add_cat_freq_table", "Add to Report"))
               )
             ),
             
@@ -431,7 +495,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                   plotly::plotlyOutput(ns("cat_barchart"), height = "400px"),
                   type = 8
                 ),
-                div(class = "mt-2 text-end", report_button(ns, "add_cat_barchart", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_barchart")), report_button(ns, "add_cat_barchart", "Add to Report"))
               )
             ),
             
@@ -458,11 +522,11 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-6",
                     selectInput(ns("crosstab_row"), "Row variable:",
-                               choices = categorical_cols())
+                               choices = labelled_choices(categorical_cols()))
                   ),
                   div(class = "col-md-6",
                     selectInput(ns("crosstab_col"), "Column variable:",
-                               choices = categorical_cols())
+                               choices = labelled_choices(categorical_cols()))
                   )
                 )
               )
@@ -476,7 +540,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                   div(class = "card-header", h5("Chi-Square Test")),
                   div(class = "card-body",
                     uiOutput(ns("chi_square_result")),
-                    div(class = "mt-2 text-end", report_button(ns, "add_chi_square", "Add to Report"))
+                    div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_chisq")), report_button(ns, "add_chi_square", "Add to Report"))
                   )
                 )
               ),
@@ -500,7 +564,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                   type = 8,
                   color = "#0d6efd"
                 ),
-                div(class = "mt-2 text-end", report_button(ns, "add_crosstab_table", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_crosstab")), report_button(ns, "add_crosstab_table", "Add to Report"))
               )
             ),
             
@@ -513,7 +577,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                   plotly::plotlyOutput(ns("crosstab_chart"), height = "400px"),
                   type = 8
                 ),
-                div(class = "mt-2 text-end", report_button(ns, "add_crosstab_chart", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_crosschart")), report_button(ns, "add_crosstab_chart", "Add to Report"))
               )
             ),
             
@@ -540,11 +604,11 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-6",
                     selectInput(ns("group_var"), "Variable to summarize:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-6",
                     selectInput(ns("group_by"), "Group by:",
-                               choices = categorical_cols())
+                               choices = labelled_choices(categorical_cols()))
                   )
                 )
               )
@@ -560,7 +624,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                   type = 8,
                   color = "#0d6efd"
                 ),
-                div(class = "mt-2 text-end", report_button(ns, "add_grouped_table", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_grouped")), report_button(ns, "add_grouped_table", "Add to Report"))
               )
             ),
             
@@ -575,7 +639,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                       plotly::plotlyOutput(ns("grouped_boxplot"), height = "350px"),
                       type = 8
                     ),
-                    div(class = "mt-2 text-end", report_button(ns, "add_grouped_boxplot", "Add to Report"))
+                    div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_groupedbox")), report_button(ns, "add_grouped_boxplot", "Add to Report"))
                   )
                 )
               ),
@@ -587,7 +651,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                       plotly::plotlyOutput(ns("grouped_means"), height = "350px"),
                       type = 8
                     ),
-                    div(class = "mt-2 text-end", report_button(ns, "add_grouped_means", "Add to Report"))
+                    div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center", ai_assistant_ui(ns("ai_groupedmeans")), report_button(ns, "add_grouped_means", "Add to Report"))
                   )
                 )
               )
@@ -700,39 +764,72 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
     output$cont_histogram <- plotly::renderPlotly({
       req(input$cont_var)
       req(data_exists())
-      
+
       var <- input$cont_var
       x <- df_data()[[var]]
-      
-      p <- ggplot(data.frame(value = x), aes(x = value)) +
+      plot_df <- data.frame(.sap_value = suppressWarnings(as.numeric(x)))
+      plot_df <- plot_df[is.finite(plot_df$.sap_value), , drop = FALSE]
+      if (nrow(plot_df) == 0L) {
+        return(sap_empty_plotly("This variable has no finite numeric values to plot."))
+      }
+
+      # Keep a ggplot copy for report export, but render the interactive chart
+      # with native plotly. This avoids the ggplotly aesthetic-evaluation failure
+      # that produced `object 'value' not found` with some ggplot2/plotly builds.
+      p <- ggplot(plot_df, aes(x = .sap_value)) +
         geom_histogram(bins = 30, fill = "#0d6efd", alpha = 0.7, color = "white") +
         theme_minimal() +
-        labs(title = paste("Distribution of", var),
-             x = var,
-             y = "Frequency") +
+        labs(title = paste("Distribution of", var), x = var, y = "Frequency") +
         theme(plot.title = element_text(hjust = 0.5))
-      
-      plotly::ggplotly(pc$keep("cont_histogram", p), tooltip = c("x", "y"))
+      pc$keep("cont_histogram", p)
+
+      fig <- plotly::plot_ly(
+        data = plot_df, x = ~.sap_value, type = "histogram", nbinsx = 30,
+        marker = list(color = "#0d6efd", line = list(color = "white", width = 1)),
+        hovertemplate = paste0(var, ": %{x}<br>Count: %{y}<extra></extra>")
+      )
+      fig <- plotly::layout(
+        fig,
+        title = paste("Distribution of", as.character(var)[1]),
+        xaxis = list(title = as.character(var)[1]), yaxis = list(title = "Frequency"),
+        bargap = 0.04, margin = list(l = 55, r = 20, t = 55, b = 55)
+      )
+      plotly::config(fig, displaylogo = FALSE, responsive = TRUE)
     })
-    
+
     output$cont_boxplot <- plotly::renderPlotly({
       req(input$cont_var)
       req(data_exists())
-      
+
       var <- input$cont_var
       x <- df_data()[[var]]
-      
-      p <- ggplot(data.frame(value = x), aes(y = value)) +
+      plot_df <- data.frame(.sap_value = suppressWarnings(as.numeric(x)))
+      plot_df <- plot_df[is.finite(plot_df$.sap_value), , drop = FALSE]
+      if (nrow(plot_df) == 0L) {
+        return(sap_empty_plotly("This variable has no finite numeric values to plot."))
+      }
+
+      p <- ggplot(plot_df, aes(y = .sap_value)) +
         geom_boxplot(fill = "#198754", alpha = 0.6) +
         theme_minimal() +
-        labs(title = paste("Box Plot of", var),
-             y = var) +
-        theme(axis.text.x = element_blank(),
-              plot.title = element_text(hjust = 0.5))
-      
-      plotly::ggplotly(pc$keep("cont_boxplot", p), tooltip = c("y"))
+        labs(title = paste("Box Plot of", var), y = var) +
+        theme(axis.text.x = element_blank(), plot.title = element_text(hjust = 0.5))
+      pc$keep("cont_boxplot", p)
+
+      fig <- plotly::plot_ly(
+        data = plot_df, y = ~.sap_value, type = "box", name = var,
+        boxpoints = "outliers", marker = list(color = "#198754"),
+        hovertemplate = paste0(var, ": %{y}<extra></extra>")
+      )
+      fig <- plotly::layout(
+        fig,
+        title = paste("Box Plot of", as.character(var)[1]),
+        yaxis = list(title = as.character(var)[1]), xaxis = list(title = ""),
+        margin = list(l = 55, r = 20, t = 55, b = 35), showlegend = FALSE
+      )
+      plotly::config(fig, displaylogo = FALSE, responsive = TRUE)
     })
-    
+
     # Normality test
     output$normality_result <- renderUI({
       if (is.null(input$btn_norm_test) || input$btn_norm_test == 0) return(NULL)
@@ -767,6 +864,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         paste0(input$cont_var, "_summary_", Sys.Date(), ".csv")
       },
       content = function(file) {
+        sap_export_assert(services, "continuous summary CSV export")
         summary_stats <- cont_summary()
         
         df_export <- data.frame(
@@ -781,6 +879,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
             summary_stats$ci_lower, summary_stats$ci_upper
           )
         )
+        sap_export_assert_content(services, df_export, "continuous summary CSV export")
         
         write.csv(df_export, file, row.names = FALSE)
       }
@@ -792,6 +891,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         paste0(input$cont_var, "_summary_", Sys.Date(), ".xlsx")
       },
       content = function(file) {
+        sap_export_assert(services, "continuous summary Excel export")
         summary_stats <- cont_summary()
         
         df_export <- data.frame(
@@ -806,6 +906,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
             summary_stats$ci_lower, summary_stats$ci_upper
           )
         )
+        sap_export_assert_content(services, df_export, "continuous summary Excel export")
         
         wb <- openxlsx::createWorkbook()
         openxlsx::addWorksheet(wb, "Summary Statistics")
@@ -888,7 +989,9 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         theme(axis.text.x = element_text(angle = 45, hjust = 1),
               plot.title = element_text(hjust = 0.5))
       
-      plotly::ggplotly(pc$keep("cat_barchart", p), tooltip = c("x", "y"))
+      pc$keep("cat_barchart", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     # Download categorical CSV
@@ -897,6 +1000,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         paste0(input$cat_var, "_frequencies_", Sys.Date(), ".csv")
       },
       content = function(file) {
+        sap_export_assert(services, "categorical summary CSV export")
         summary_stats <- cat_summary()
         categories <- names(summary_stats$counts)
         counts <- as.numeric(summary_stats$counts)
@@ -906,6 +1010,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
           Count = counts,
           Percentage = round(counts / sum(counts) * 100, 2)
         )
+        sap_export_assert_content(services, df_export, "categorical summary CSV export")
         
         write.csv(df_export, file, row.names = FALSE)
       }
@@ -917,6 +1022,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         paste0(input$cat_var, "_frequencies_", Sys.Date(), ".xlsx")
       },
       content = function(file) {
+        sap_export_assert(services, "categorical summary Excel export")
         summary_stats <- cat_summary()
         categories <- names(summary_stats$counts)
         counts <- as.numeric(summary_stats$counts)
@@ -926,6 +1032,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
           Count = counts,
           Percentage = round(counts / sum(counts) * 100, 2)
         )
+        sap_export_assert_content(services, df_export, "categorical summary Excel export")
         
         wb <- openxlsx::createWorkbook()
         openxlsx::addWorksheet(wb, "Frequencies")
@@ -1042,7 +1149,9 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         theme(axis.text.x = element_text(angle = 45, hjust = 1),
               plot.title = element_text(hjust = 0.5))
       
-      plotly::ggplotly(pc$keep("crosstab_chart", p), tooltip = c("x", "fill", "y"))
+      pc$keep("crosstab_chart", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "fill", "y"))
     })
     
     # Download cross-tab CSV
@@ -1054,6 +1163,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
       content = function(file) {
         tbl <- crosstab_data()$table
         df_ct <- as.data.frame.matrix(tbl)
+        sap_export_assert_content(services, df_ct, "crosstab CSV export")
         write.csv(df_ct, file)
       }
     )
@@ -1067,6 +1177,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
       content = function(file) {
         tbl <- crosstab_data()$table
         df_ct <- as.data.frame.matrix(tbl)
+        sap_export_assert_content(services, df_ct, "crosstab Excel export")
         
         wb <- openxlsx::createWorkbook()
         openxlsx::addWorksheet(wb, "Contingency Table")
@@ -1117,7 +1228,9 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
              y = input$group_var) +
         theme(plot.title = element_text(hjust = 0.5))
       
-      plotly::ggplotly(pc$keep("grouped_boxplot", p), tooltip = c("x", "y"))
+      pc$keep("grouped_boxplot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     output$grouped_means <- plotly::renderPlotly({
@@ -1141,7 +1254,9 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         theme(plot.title = element_text(hjust = 0.5),
               plot.subtitle = element_text(hjust = 0.5, size = 10))
       
-      plotly::ggplotly(pc$keep("grouped_means", p), tooltip = c("x", "y"))
+      pc$keep("grouped_means", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     # Download grouped CSV
@@ -1151,6 +1266,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                input$group_by, "_", Sys.Date(), ".csv")
       },
       content = function(file) {
+        sap_export_assert_content(services, grouped_data(), "grouped summary CSV export")
         write.csv(grouped_data(), file, row.names = FALSE)
       }
     )
@@ -1162,6 +1278,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
                input$group_by, "_", Sys.Date(), ".xlsx")
       },
       content = function(file) {
+        sap_export_assert_content(services, grouped_data(), "grouped summary Excel export")
         wb <- openxlsx::createWorkbook()
         openxlsx::addWorksheet(wb, "Grouped Summary")
         openxlsx::writeData(wb, 1, grouped_data())
@@ -1178,6 +1295,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         paste0("descriptive_statistics_", Sys.Date(), ".xlsx")
       },
       content = function(file) {
+        sap_export_assert(services, "all descriptive statistics Excel export")
         wb <- openxlsx::createWorkbook()
         
         # Add continuous summaries for all numeric vars
@@ -1231,6 +1349,7 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
         paste0("report_", Sys.Date(), ".html")
       },
       content = function(file) {
+        sap_export_assert(services, "descriptive statistics HTML report")
         # Create HTML report
         html_content <- sprintf(
           "<!DOCTYPE html>
@@ -1276,6 +1395,203 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
       }
     )
     
+    # =========================================================================
+    # AI INTERPRETATION (Phase B: Descriptive Stats)
+    # Two anchors — the numeric summary and the categorical frequency table.
+    # Payloads are STRUCTURED (the summary/frequency data frames + variable
+    # LABELS from the dictionary). No raw dataset is ever sent.
+    # =========================================================================
+    mod_ai_assistant_server(
+      "ai_cont", services,
+      payload = function() {
+        df <- tryCatch(cont_summary_df(), error = function(e) NULL)
+        if (is.null(df) || is.null(input$cont_var)) return(NULL)
+        list(
+          analysis_type = "Descriptive statistics (numeric variable)",
+          variables = dlabel(input$cont_var),
+          results   = df,
+          n = tryCatch(sum(!is.na(df_data()[[input$cont_var]])), error = function(e) NULL),
+          metadata = list(variable = dlabel(input$cont_var))
+        )
+      })
+
+    mod_ai_assistant_server(
+      "ai_cat", services,
+      payload = function() {
+        df <- tryCatch(cat_freq_df(), error = function(e) NULL)
+        if (is.null(df) || is.null(input$cat_var)) return(NULL)
+        list(
+          analysis_type = "Frequency distribution (categorical variable)",
+          variables = dlabel(input$cat_var),
+          results   = df,
+          n = tryCatch(sum(df$Count, na.rm = TRUE), error = function(e) NULL),
+          metadata = list(variable = dlabel(input$cat_var),
+                          categories = nrow(df))
+        )
+      })
+
+    # --- Additional AI anchors: every remaining output on this page ----------
+    # Each payload is STRUCTURED (a result table, test result, or chart summary)
+    # with variable LABELS via dlabel(). No raw dataset is sent.
+
+    # Normality (Shapiro-Wilk) — a hypothesis test
+    mod_ai_assistant_server(
+      "ai_normality", services,
+      payload = function() {
+        v <- input$cont_var
+        if (is.null(v)) return(NULL)
+        res <- tryCatch(stat_result_df(test_normality(df_data()[[v]])),
+                        error = function(e) NULL)
+        if (is.null(res)) return(NULL)
+        list(
+          analysis_type = "Shapiro-Wilk normality test",
+          variables = dlabel(v),
+          results   = res,
+          assumptions = "Shapiro-Wilk tests the null hypothesis that the data are normally distributed",
+          metadata = list(variable = dlabel(v))
+        )
+      }, default_style = "Technical Interpretation")
+
+    # Histogram
+    mod_ai_assistant_server(
+      "ai_histogram", services,
+      payload = function() {
+        v <- input$cont_var
+        if (is.null(v)) return(NULL)
+        stats <- tryCatch({
+          x <- df_data()[[v]]; x <- x[!is.na(x)]
+          sprintf("mean=%.3g, sd=%.3g, skewness direction from mean vs median (median=%.3g)",
+                  mean(x), sd(x), median(x))
+        }, error = function(e) NULL)
+        list(analysis_type = "Histogram (distribution shape)",
+             variables = dlabel(v),
+             chart_summary = sprintf("Histogram of %s. %s", dlabel(v), stats %||% ""),
+             metadata = list(variable = dlabel(v)))
+      })
+
+    # Boxplot
+    mod_ai_assistant_server(
+      "ai_boxplot", services,
+      payload = function() {
+        v <- input$cont_var
+        if (is.null(v)) return(NULL)
+        stats <- tryCatch({
+          x <- df_data()[[v]]; x <- x[!is.na(x)]
+          q <- stats::quantile(x, c(.25,.5,.75))
+          sprintf("Q1=%.3g, median=%.3g, Q3=%.3g, IQR=%.3g", q[1], q[2], q[3], q[3]-q[1])
+        }, error = function(e) NULL)
+        list(analysis_type = "Boxplot (spread and outliers)",
+             variables = dlabel(v),
+             chart_summary = sprintf("Boxplot of %s. %s", dlabel(v), stats %||% ""),
+             metadata = list(variable = dlabel(v)))
+      })
+
+    # Bar chart (categorical)
+    mod_ai_assistant_server(
+      "ai_barchart", services,
+      payload = function() {
+        v <- input$cat_var
+        df <- tryCatch(cat_freq_df(), error = function(e) NULL)
+        if (is.null(v) || is.null(df)) return(NULL)
+        list(analysis_type = "Bar chart (category frequencies)",
+             variables = dlabel(v),
+             results = df,
+             chart_summary = sprintf("Bar chart of %s across %d categories.",
+                                     dlabel(v), nrow(df)),
+             metadata = list(variable = dlabel(v)))
+      })
+
+    # Chi-square test — a hypothesis test
+    mod_ai_assistant_server(
+      "ai_chisq", services,
+      payload = function() {
+        ct <- tryCatch(crosstab_data(), error = function(e) NULL)
+        if (is.null(ct)) return(NULL)
+        res <- data.frame(
+          Statistic = c("Chi-square", "df", "p-value", "N"),
+          Value = c(round(ct$chi_square %||% NA, 4), ct$df %||% NA,
+                    signif(ct$p_value %||% NA, 4), ct$n %||% NA),
+          stringsAsFactors = FALSE)
+        list(
+          analysis_type = "Chi-square test of independence",
+          variables = c(dlabel(input$crosstab_row), dlabel(input$crosstab_col)),
+          results = res,
+          assumptions = "Chi-square assumes expected cell counts >= 5; tests independence of the two categorical variables",
+          metadata = list(row = dlabel(input$crosstab_row),
+                          col = dlabel(input$crosstab_col)))
+      }, default_style = "Technical Interpretation")
+
+    # Crosstab table
+    mod_ai_assistant_server(
+      "ai_crosstab", services,
+      payload = function() {
+        df <- tryCatch(crosstab_df(), error = function(e) NULL)
+        if (is.null(df)) return(NULL)
+        list(analysis_type = "Crosstabulation",
+             variables = c(dlabel(input$crosstab_row), dlabel(input$crosstab_col)),
+             results = df,
+             metadata = list(row = dlabel(input$crosstab_row),
+                             col = dlabel(input$crosstab_col)))
+      })
+
+    # Crosstab chart
+    mod_ai_assistant_server(
+      "ai_crosschart", services,
+      payload = function() {
+        df <- tryCatch(crosstab_df(), error = function(e) NULL)
+        if (is.null(df)) return(NULL)
+        list(analysis_type = "Crosstab chart (grouped bars)",
+             variables = c(dlabel(input$crosstab_row), dlabel(input$crosstab_col)),
+             results = df,
+             chart_summary = sprintf("Grouped bar chart of %s by %s.",
+                                     dlabel(input$crosstab_row), dlabel(input$crosstab_col)),
+             metadata = list(row = dlabel(input$crosstab_row),
+                             col = dlabel(input$crosstab_col)))
+      })
+
+    # Grouped summary table
+    mod_ai_assistant_server(
+      "ai_grouped", services,
+      payload = function() {
+        df <- tryCatch(grouped_data(), error = function(e) NULL)
+        if (is.null(df)) return(NULL)
+        list(analysis_type = "Grouped summary (numeric by group)",
+             variables = c(dlabel(input$group_var), dlabel(input$group_by)),
+             results = df,
+             metadata = list(summarized = dlabel(input$group_var),
+                             grouped_by = dlabel(input$group_by)))
+      })
+
+    # Grouped boxplot
+    mod_ai_assistant_server(
+      "ai_groupedbox", services,
+      payload = function() {
+        df <- tryCatch(grouped_data(), error = function(e) NULL)
+        if (is.null(df)) return(NULL)
+        list(analysis_type = "Grouped boxplot",
+             variables = c(dlabel(input$group_var), dlabel(input$group_by)),
+             results = df,
+             chart_summary = sprintf("Boxplots of %s across levels of %s.",
+                                     dlabel(input$group_var), dlabel(input$group_by)),
+             metadata = list(summarized = dlabel(input$group_var),
+                             grouped_by = dlabel(input$group_by)))
+      })
+
+    # Grouped means chart
+    mod_ai_assistant_server(
+      "ai_groupedmeans", services,
+      payload = function() {
+        df <- tryCatch(grouped_data(), error = function(e) NULL)
+        if (is.null(df)) return(NULL)
+        list(analysis_type = "Group means chart",
+             variables = c(dlabel(input$group_var), dlabel(input$group_by)),
+             results = df,
+             chart_summary = sprintf("Mean of %s by %s with error bars.",
+                                     dlabel(input$group_var), dlabel(input$group_by)),
+             metadata = list(summarized = dlabel(input$group_var),
+                             grouped_by = dlabel(input$group_by)))
+      })
+
     # =========================================================================
     # ADD TO REPORT  —  every output on this page
     # report_button() in the UI, register_report_button() here. See 00_services.R
@@ -1390,4 +1706,4 @@ mod_descriptive_stats_server <- function(id, app_state, services = NULL) {
 # END OF MODULE 5: DESCRIPTIVE STATISTICS
 # =============================================================================
 
-message("[SAP] Descriptive Stats v2.4-20260708 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Descriptive Stats v2.9-20260801 loaded")  # SAP_MODULE_BANNER

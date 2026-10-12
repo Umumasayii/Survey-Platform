@@ -1,105 +1,196 @@
 # =============================================================================
-# preflight_persistence.R  —  Phase 1 round-trip test. Run from the project
-# folder:  source("preflight_persistence.R")
-#
-# Proves the persistence spine end to end WITHOUT starting Shiny:
-#   1. build a pool on a throwaway SQLite file
-#   2. db_init (schema + migration)
-#   3. create a project, mark it current
-#   4. DatasetService$set() a data.frame -> should persist to the DAL
-#   5. simulate "reopen": fresh app_state, ProjectService$open()
-#   6. assert the dataset came back byte-identical
+# Survey Analytics Platform 4.1 — non-destructive persistence round-trip
+# =============================================================================
+# Test rows are created inside one transaction and rolled back. Function-local
+# connection names and exit handlers prevent interference with other sourced
+# preflight scripts.
 # =============================================================================
 
-suppressMessages({
-  library(DBI); library(RSQLite); library(pool); library(R6)
-  library(blob); library(jsonlite)
-})
+.sap_preflight_persistence <- function(project_root = getwd()) {
+  if (file.exists(file.path(project_root, "sap_environment.R"))) {
+    source(file.path(project_root, "sap_environment.R"), local = FALSE)
+    sap_load_project_env(project_root, quiet = TRUE)
+  }
 
-cat("\n--- Phase 1 persistence round-trip ---\n\n")
+  required <- c("DBI", "RPostgres", "pool", "blob", "jsonlite", "sodium",
+                "digest", "R6", "shiny", "dplyr", "tibble")
+  missing <- required[
+    !vapply(required, requireNamespace, logical(1), quietly = TRUE)
+  ]
+  if (length(missing)) {
+    stop("Install missing packages: ", paste(missing, collapse = ", "),
+         call. = FALSE)
+  }
 
-# Minimal shiny::reactiveVal / isolate shims so the R6 services load headless.
-if (!requireNamespace("shiny", quietly = TRUE)) {
-  shiny <- local({
-    reactiveVal <- function(x) { v <- x; function(new) if (missing(new)) v else { v <<- new; invisible(v) } }
-    isolate <- function(x) x
-    list(reactiveVal = reactiveVal, isolate = isolate)
-  })
+  source(file.path(project_root, "global_no_gtsummary.R"), local = FALSE)
+  source(file.path(project_root, "db_backend.R"), local = FALSE)
+  source(file.path(project_root, "00_services.R"), local = FALSE)
+
+  persistence_con <- db_connect_direct()
+  on.exit({
+    if (inherits(persistence_con, "DBIConnection")) {
+      try(db_disconnect(persistence_con), silent = TRUE)
+    }
+  }, add = TRUE)
+
+  if (!isTRUE(DBI::dbIsValid(persistence_con))) {
+    stop("Persistence preflight received an invalid PostgreSQL connection.",
+         call. = FALSE)
+  }
+
+  db_init(persistence_con)
+
+  DBI::dbBegin(persistence_con)
+  transaction_open <- TRUE
+  on.exit({
+    if (isTRUE(transaction_open) && isTRUE(DBI::dbIsValid(persistence_con))) {
+      try(DBI::dbRollback(persistence_con), silent = TRUE)
+    }
+  }, add = TRUE)
+
+  suffix <- paste0(format(Sys.time(), "%Y%m%d%H%M%S"), sample(1000:9999, 1))
+  username <- paste0("roundtrip_", suffix)
+  email <- paste0(username, "@example.invalid")
+  password <- "Persistence round-trip passphrase 2026!"
+
+  state1 <- new.env(parent = emptyenv())
+  state1$current_user <- NULL
+  state1$current_project <- NULL
+  state1$current_project_name <- "Presentation Workspace"
+  state1$data_imported <- FALSE
+  state1$processed_data <- NULL
+  state1$raw_data <- NULL
+  state1$variable_types <- NULL
+  state1$variable_dictionary <- data.frame()
+  services1 <- create_services(
+    state1, pool = persistence_con, settings_path = tempfile()
+  )
+
+  reg <- services1$auth$register(username, password, email, "Round-trip Test")
+  stopifnot(isTRUE(reg$ok))
+  login <- services1$auth$login(username, password)
+  stopifnot(
+    isTRUE(login$ok),
+    identical(as.integer(state1$current_user), as.integer(reg$user_id))
+  )
+
+  pid <- services1$project$create(
+    "Persistence round-trip", "Temporary rollback test",
+    persist_current = FALSE
+  )
+  stopifnot(!is.null(pid))
+
+  original <- data.frame(
+    respondent_id = 1:12,
+    group = rep(c("A", "B"), 6),
+    score = c(10.2, 11.5, 9.8, 12.1, 13.0, 8.9,
+              10.8, 11.1, 9.5, 12.7, 13.2, 9.1),
+    stringsAsFactors = FALSE
+  )
+  processed <- original
+  processed$score_centered <- processed$score - mean(processed$score)
+  variable_types <- detect_variable_types(processed)
+
+  services1$data$set(
+    original, kind = "raw", module = "preflight",
+    description = "raw persistence round-trip",
+    variable_types = detect_variable_types(original),
+    name = "Round-trip dataset"
+  )
+  services1$data$set(
+    processed, kind = "processed", module = "preflight",
+    description = "processed persistence round-trip",
+    variable_types = variable_types,
+    name = "Round-trip dataset"
+  )
+  services1$metadata$populate(processed, project_id = pid)
+  db_log_action(
+    persistence_con, pid, user_id = reg$user_id, module = "preflight",
+    action_type = "round_trip", description = "Temporary persistence test"
+  )
+
+  state2 <- new.env(parent = emptyenv())
+  state2$current_user <- reg$user_id
+  state2$current_project <- NULL
+  state2$current_project_name <- "Presentation Workspace"
+  state2$data_imported <- FALSE
+  state2$processed_data <- NULL
+  state2$raw_data <- NULL
+  state2$variable_types <- NULL
+  state2$variable_dictionary <- data.frame()
+  services2 <- create_services(
+    state2, pool = persistence_con, settings_path = tempfile()
+  )
+  stopifnot(isTRUE(services2$project$open(pid)))
+
+  restored_raw <- services2$data$get("raw")
+  restored_processed <- services2$data$get("processed")
+  stopifnot(is.data.frame(restored_raw), isTRUE(all.equal(restored_raw, original)))
+  stopifnot(
+    is.data.frame(restored_processed),
+    isTRUE(all.equal(restored_processed, processed))
+  )
+  stopifnot(identical(state2$dataset_name, "Round-trip dataset"))
+  stopifnot(nrow(db_get_dictionary(persistence_con, pid)) == ncol(processed))
+  stopifnot(nrow(db_get_history(persistence_con, pid)) >= 1L)
+
+  # User workspace checkpoints survive a fresh service state and point only to
+  # owner-scoped project/navigation metadata, not raw respondent rows.
+  state1$current_route <- "ml"
+  state1$last_action <- "Binary logistic regression configured"
+  stopifnot(isTRUE(services1$workspace$save(
+    last_route = "ml", last_module = "ml",
+    last_analysis = state1$last_action,
+    state = list(dataset_name = "Round-trip dataset", active_filter_label = "All respondents")
+  )))
+  ws <- services2$workspace$load()
+  stopifnot(is.data.frame(ws), nrow(ws) == 1L)
+  stopifnot(identical(as.integer(ws$project_id[[1]]), as.integer(pid)))
+  stopifnot(identical(as.character(ws$last_route[[1]]), "ml"))
+  stopifnot(identical(as.character(ws$last_analysis[[1]]), state1$last_action))
+
+  # Authentication sessions are real server-side rows and remain owner-bound.
+  sid <- services1$auth$current_session_id()
+  stopifnot(!is.null(sid), isTRUE(db_session_is_active(persistence_con, sid, reg$user_id)))
+
+  # Two-user isolation: a second valid account cannot list/open/rename/delete
+  # the first user's project through the ProjectService boundary.
+  reg2 <- services1$auth$register(
+    paste0(username, "_other"), password, paste0("other_", email), "Other User"
+  )
+  stopifnot(isTRUE(reg2$ok))
+  state3 <- new.env(parent = emptyenv())
+  state3$current_user <- reg2$user_id
+  state3$current_project <- NULL
+  state3$current_project_name <- "Presentation Workspace"
+  state3$data_imported <- FALSE
+  state3$processed_data <- NULL
+  state3$raw_data <- NULL
+  state3$variable_types <- NULL
+  state3$variable_dictionary <- data.frame()
+  services3 <- create_services(state3, pool = persistence_con, settings_path = tempfile())
+  visible_projects <- services3$project$list()
+  stopifnot(!nrow(visible_projects) || !pid %in% visible_projects$id)
+  stopifnot(identical(services3$project$open(pid), FALSE))
+  stopifnot(identical(services3$project$rename(pid, name = "unauthorised"), FALSE))
+  stopifnot(identical(services3$project$delete(pid), FALSE))
+
+  services1$auth$logout()
+  stopifnot(!isTRUE(db_session_is_active(persistence_con, sid, reg$user_id)))
+
+  DBI::dbRollback(persistence_con)
+  transaction_open <- FALSE
+
+  cat("✓ Account registration, server-side session creation and logout revocation persisted.\n")
+  cat("✓ Owner-scoped project persisted.\n")
+  cat("✓ Two-user project isolation blocked list/open/rename/delete access.\n")
+  cat("✓ Raw and processed dataset versions restored byte-equivalent in a fresh service state.\n")
+  cat("✓ Dataset display name persisted.\n")
+  cat("✓ Variable dictionary and audit history persisted.\n")
+  cat("✓ Per-user workspace checkpoint persisted and restored.\n")
+  cat("✓ Test transaction rolled back; no test data remains.\n")
+  invisible(TRUE)
 }
-`%||%` <- function(x, y) if (is.null(x)) y else x
 
-source("db_backend.R")
-source("00_services.R")
-
-tmp <- tempfile(fileext = ".sqlite")
-p   <- db_connect(backend = "sqlite", sqlite_path = tmp)
-db_init(p, backend = "sqlite")
-cat("1. schema built\n")
-
-# users table + migration present?
-tbls <- DBI::dbListTables(p)
-stopifnot("users" %in% tbls, "projects" %in% tbls, "datasets" %in% tbls)
-cols <- DBI::dbGetQuery(p, "PRAGMA table_info(projects);")$name
-stopifnot(all(c("owner_id", "is_archived", "is_favourite") %in% cols))
-cat("2. users table + owner_id migration OK\n")
-
-# db_init now seeds a default 'local' user (id 1) so owner_id = 1 is a valid FK.
-n_seed <- db_user_count(p)
-stopifnot(n_seed == 1)
-cat("2b. default user seeded (count =", n_seed, ")\n")
-
-# Fake app_state as a plain environment (reactiveValues not needed headless).
-app_state <- new.env()
-app_state$current_project <- NULL
-app_state$current_user    <- 1L
-app_state$data_imported   <- FALSE
-app_state$processed_data  <- NULL
-app_state$raw_data        <- NULL
-app_state$variable_types  <- NULL
-
-services <- create_services(app_state, pool = p, settings_path = tempfile())
-cat("3. services created (project svc present: ",
-    !is.null(services$project), ")\n", sep = "")
-
-# Create a project, then persist a dataset through the service.
-pid <- services$project$create("Round-trip test", persist_current = FALSE)
-stopifnot(!is.null(pid), identical(app_state$current_project, pid))
-cat("4. project created, id =", pid, "\n")
-
-original <- data.frame(
-  id    = 1:200,
-  group = rep(c("a", "b"), 100),
-  value = rnorm(200),
-  stringsAsFactors = FALSE
-)
-services$data$set(original, kind = "processed", module = "test",
-                  description = "seed", variable_types = list(value = "numeric"))
-cat("5. dataset set + persisted\n")
-
-# Simulate reopening: brand-new app_state, brand-new services, same pool.
-app_state2 <- new.env()
-app_state2$current_project <- NULL
-app_state2$current_user    <- 1L
-app_state2$data_imported   <- FALSE
-services2 <- create_services(app_state2, pool = p, settings_path = tempfile())
-
-recent <- services2$project$list()
-stopifnot(nrow(recent) >= 1)
-services2$project$open(recent$id[1])
-cat("6. reopened project", recent$id[1], "\n")
-
-restored <- services2$data$get("processed")
-stopifnot(is.data.frame(restored))
-stopifnot(identical(dim(restored), dim(original)))
-stopifnot(isTRUE(all.equal(restored, original)))
-cat("7. dataset restored byte-identical: PASS\n")
-
-# users DAL smoke test (a 'local' user already exists from the seed -> count 2)
-uid <- db_create_user(p, "tester", password_hash = "x", email = "t@e.com")
-stopifnot(db_username_exists(p, "tester"), db_email_exists(p, "t@e.com"),
-          !is.null(db_get_user(p, "tester")), db_user_count(p) == 2)
-cat("8. users DAL OK (created id", uid, ", total users", db_user_count(p), ")\n")
-
-db_disconnect(p)
-unlink(tmp)
-cat("\n--- ALL PHASE 1 CHECKS PASSED ---\n\n")
+.sap_preflight_persistence()
+rm(.sap_preflight_persistence)

@@ -176,8 +176,8 @@ run_tool_checks <- function() {
   )
 
   latex_path <- Sys.which("pdflatex")
-  tinytex_ok <- requireNamespace("tinytex", quietly = TRUE) &&
-    tryCatch(tinytex::is_tinytex(), error = function(e) FALSE)
+  tinytex_ok <- sap_optional_available("tinytex") &&
+    tryCatch(sap_optional_call("tinytex", "is_tinytex"), error = function(e) FALSE)
   latex_ok <- nzchar(latex_path) || tinytex_ok
   rows[[length(rows) + 1]] <- diag_row(
     "External tools", "LaTeX (PDF reports)",
@@ -309,7 +309,7 @@ mod_system_diagnostics_ui <- function(id) {
 # SERVER
 # =============================================================================
 
-mod_system_diagnostics_server <- function(id, app_state) {
+mod_system_diagnostics_server <- function(id, app_state, services = NULL) {
   moduleServer(id, function(input, output, session) {
 
     # Runs once at startup (ignoreNULL = FALSE) and on every button press.
@@ -375,6 +375,11 @@ mod_system_diagnostics_server <- function(id, app_state) {
         paste0("sap_diagnostics_", format(Sys.Date(), "%Y%m%d"), ".txt")
       },
       content = function(file) {
+        if (!is.null(services) && !is.null(services$privacy)) {
+          services$privacy$assert_content_export_allowed(
+            build_diagnostic_report(results()), "system diagnostics export"
+          )
+        }
         writeLines(build_diagnostic_report(results()), file)
       }
     )

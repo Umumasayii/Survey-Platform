@@ -22,18 +22,23 @@
 mod_data_cleaning_ui <- function(id) {
   ns <- NS(id)
   
-  tagList(
+  div(
+    class = "sap-data-cleaning-page",
     # Header
-    div(
-      class = "mb-4",
-      h2(icon("broom"), "Data Cleaning"),
-      p("Clean, transform, and validate your data with professional tools", 
-        class = "text-muted")
+    sap_module_header(
+      "Data Cleaning",
+      "Profile data quality, clean one or many columns visually, compare changes, and keep every transformation reversible.",
+      icon_name = "sliders",
+      badge = "Data preparation"
     ),
     
     # Tab structure
     navset_tab(
       id = ns("cleaning_tabs"),
+
+      # NEW v5.2: visual, non-coding cleaning path. The expert tabs below
+      # remain unchanged and available for experienced analysts.
+      sap_guided_cleaning_ui(ns),
       
       # TAB 1: QUALITY ASSESSMENT
       nav_panel(
@@ -547,6 +552,114 @@ mod_data_cleaning_ui <- function(id) {
                            class = "btn btn-primary btn-lg")
               )
             )
+          ),
+
+          # ===== HEADER MANAGEMENT =====
+          div(class = "card mt-4",
+            div(class = "card-header", h5(tagList(icon("heading"), " Column Headers"))),
+            div(class = "card-body",
+              p(class = "text-muted small",
+                "If data imported without headers (columns look like V1, V2...), promote the first row to headers or rename columns yourself."),
+              div(class = "row g-2 align-items-end",
+                div(class = "col-md-5",
+                  selectInput(ns("header_action"), "Action",
+                    choices = c("Promote first data row to headers" = "promote",
+                                "Set / edit column names manually" = "manual"))),
+                div(class = "col-md-7",
+                  conditionalPanel(
+                    condition = sprintf("input['%s'] == 'manual'", ns("header_action")),
+                    textInput(ns("header_manual"), "New names (comma-separated, in order)",
+                              placeholder = "id, region, age, income", width = "100%")))
+              ),
+              uiOutput(ns("header_preview")),
+              div(class = "d-flex gap-2 mt-2",
+                  actionButton(ns("btn_header_preview"), "Preview",
+                               class = "btn-outline-secondary btn-sm", icon = icon("eye")),
+                  actionButton(ns("btn_header_apply"), "Apply headers",
+                               class = "btn-primary btn-sm", icon = icon("check")))
+            )
+          ),
+
+          # ===== CREATE VARIABLE - MATH =====
+          div(class = "card mt-4",
+            div(class = "card-header", h5(tagList(icon("calculator"), " Create Variable - Math"))),
+            div(class = "card-body",
+              p(class = "text-muted small", "Build a new column from two variables (or a variable and a constant)."),
+              div(class = "row g-2",
+                div(class = "col-md-3", selectInput(ns("math_a"), "Variable A", choices = "")),
+                div(class = "col-md-2", selectInput(ns("math_op"), "Operation",
+                      choices = c("A + B" = "add", "A - B" = "subtract", "A x B" = "multiply",
+                                  "A / B" = "divide", "A mod B" = "modulus", "A ^ B" = "power",
+                                  "pct of total (A)" = "pct"))),
+                div(class = "col-md-3", selectInput(ns("math_b_kind"), "B is",
+                      choices = c("another variable" = "var", "a constant" = "const"))),
+                div(class = "col-md-4",
+                    conditionalPanel(condition = sprintf("input['%s'] == 'var'", ns("math_b_kind")),
+                      selectInput(ns("math_b_var"), "Variable B", choices = "")),
+                    conditionalPanel(condition = sprintf("input['%s'] == 'const'", ns("math_b_kind")),
+                      numericInput(ns("math_b_const"), "Constant", value = 1)))
+              ),
+              textInput(ns("math_name"), "New column name", placeholder = "e.g. income_per_child"),
+              uiOutput(ns("math_preview")),
+              div(class = "d-flex gap-2 mt-2",
+                  actionButton(ns("btn_math_preview"), "Preview",
+                               class = "btn-outline-secondary btn-sm", icon = icon("eye")),
+                  actionButton(ns("btn_math_apply"), "Create variable",
+                               class = "btn-primary btn-sm", icon = icon("plus")))
+            )
+          ),
+
+          # ===== CATEGORIZE =====
+          div(class = "card mt-4",
+            div(class = "card-header", h5(tagList(icon("layer-group"), " Categorize - Bin a numeric variable"))),
+            div(class = "card-body",
+              p(class = "text-muted small", "Turn a continuous variable into groups (e.g. age -> age bands)."),
+              div(class = "row g-2",
+                div(class = "col-md-4", selectInput(ns("cat_var"), "Numeric variable", choices = "")),
+                div(class = "col-md-4", selectInput(ns("cat_method"), "Method",
+                      choices = c("Equal-width intervals" = "width",
+                                  "Equal-frequency (quantiles)" = "freq",
+                                  "Manual breakpoints" = "manual"))),
+                div(class = "col-md-4",
+                    conditionalPanel(condition = sprintf("input['%s'] != 'manual'", ns("cat_method")),
+                      numericInput(ns("cat_n"), "Number of groups", value = 4, min = 2, max = 20)),
+                    conditionalPanel(condition = sprintf("input['%s'] == 'manual'", ns("cat_method")),
+                      textInput(ns("cat_breaks"), "Breakpoints (comma-separated)",
+                                placeholder = "0, 18, 35, 65, 120")))
+              ),
+              textInput(ns("cat_name"), "New column name", placeholder = "e.g. age_group"),
+              uiOutput(ns("cat_preview")),
+              div(class = "d-flex gap-2 mt-2",
+                  actionButton(ns("btn_cat_preview"), "Preview",
+                               class = "btn-outline-secondary btn-sm", icon = icon("eye")),
+                  actionButton(ns("btn_cat_apply"), "Create variable",
+                               class = "btn-primary btn-sm", icon = icon("plus")))
+            )
+          ),
+
+          # ===== CONDITIONAL (IF/ELSE) =====
+          div(class = "card mt-4 mb-2",
+            div(class = "card-header", h5(tagList(icon("code-branch"), " Create Variable - Condition (IF/ELSE)"))),
+            div(class = "card-body",
+              p(class = "text-muted small",
+                "If a condition is true assign one value, otherwise another. E.g. if age >= 18 then Adult else Minor."),
+              div(class = "row g-2 align-items-end",
+                div(class = "col-md-3", selectInput(ns("cond_var"), "If variable", choices = "")),
+                div(class = "col-md-2", selectInput(ns("cond_op"), "Operator",
+                      choices = c("greater or equal" = "ge", "greater" = "gt", "less or equal" = "le",
+                                  "less" = "lt", "equal" = "eq", "not equal" = "ne"))),
+                div(class = "col-md-2", textInput(ns("cond_value"), "Value", placeholder = "18")),
+                div(class = "col-md-2", textInput(ns("cond_then"), "Then", placeholder = "Adult")),
+                div(class = "col-md-3", textInput(ns("cond_else"), "Else", placeholder = "Minor"))
+              ),
+              textInput(ns("cond_name"), "New column name", placeholder = "e.g. adult_status"),
+              uiOutput(ns("cond_preview")),
+              div(class = "d-flex gap-2 mt-2",
+                  actionButton(ns("btn_cond_preview"), "Preview",
+                               class = "btn-outline-secondary btn-sm", icon = icon("eye")),
+                  actionButton(ns("btn_cond_apply"), "Create variable",
+                               class = "btn-primary btn-sm", icon = icon("plus")))
+            )
           )
         )
       ),
@@ -813,7 +926,9 @@ mod_data_cleaning_ui <- function(id) {
               class = "card-body",
               style = "max-height: 400px; overflow-y: auto;",
               uiOutput(ns("history_log")),
-              div(class = "mt-2 text-end", report_button(ns, "add_cleaning_history", "Add cleaning log to Report"))
+              div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                  ai_assistant_ui(ns("ai_cleaning")),
+                  report_button(ns, "add_cleaning_history", "Add cleaning log to Report"))
             )
           ),
 
@@ -866,6 +981,20 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       variable_types = NULL,
       quality_score = NULL
     )
+
+    # Publish a concise cleaning status to the application shell. The cleaning
+    # module keeps its detailed undo history private; the shell only needs the
+    # count and latest human-readable action for presentation context.
+    observeEvent(cleaning_state$history_index, {
+      app_state$transformation_count <- length(cleaning_state$history)
+      idx <- cleaning_state$history_index
+      if (idx > 0L && idx <= length(cleaning_state$history)) {
+        latest <- cleaning_state$history[[idx]]
+        if (!is.null(latest$description) && nzchar(latest$description)) {
+          app_state$last_action <- latest$description
+        }
+      }
+    }, ignoreInit = TRUE)
     
     # =========================================================================
     # INITIALIZE DATA & SYNC WITH APP STATE
@@ -877,13 +1006,29 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
     shiny::observeEvent(
       list(app_state$data_imported, app_state$processed_data),
       {
-        req(app_state$data_imported)
+        if (!isTRUE(app_state$data_imported) ||
+            !is.data.frame(app_state$processed_data)) {
+          cleaning_state$current_data <- NULL
+          cleaning_state$original_data <- NULL
+          cleaning_state$history <- list()
+          cleaning_state$history_index <- 0L
+          cleaning_state$variable_types <- NULL
+          return(invisible(NULL))
+        }
 
-        # Initialize data if not already done
-        if (is.null(cleaning_state$current_data)) {
-          cleaning_state$original_data  <- app_state$raw_data
-          cleaning_state$current_data   <- app_state$processed_data
+        incoming <- app_state$processed_data
+        is_new_source <- is.null(cleaning_state$current_data) ||
+          !identical(incoming, cleaning_state$current_data)
+
+        # A new import/demo dataset starts a fresh cleaning history. A cleaning
+        # operation does not reset itself because the service writes back the
+        # exact same data frame currently held by cleaning_state.
+        if (is_new_source) {
+          cleaning_state$original_data <- app_state$raw_data
+          cleaning_state$current_data <- incoming
           cleaning_state$variable_types <- app_state$variable_types
+          cleaning_state$history <- list()
+          cleaning_state$history_index <- 0L
         }
       },
       ignoreInit = FALSE
@@ -925,6 +1070,15 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       req(!is.null(cleaning_state$current_data))
       cleaning_state$current_data
     })
+
+    # Wire the Visual Cleaning Workbench into the same current_data/history state
+    # used by the existing expert tools. This keeps both cleaning paths fully
+    # interoperable and prevents a second, conflicting data model.
+    sap_guided_cleaning_server(
+      input = input, output = output, session = session, ns = ns,
+      app_state = app_state, services = services, cleaning_state = cleaning_state,
+      validate_data_available = validate_data_available
+    )
     
     # =========================================================================
     # TAB 1: QUALITY ASSESSMENT
@@ -935,6 +1089,10 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       req(df)
       calculate_quality_score(df)
     })
+
+    observeEvent(quality_assessment()$score, {
+      app_state$quality_score <- quality_assessment()$score
+    }, ignoreInit = FALSE)
     
     # Quality gauge
     output$quality_gauge <- plotly::renderPlotly({
@@ -1196,20 +1354,22 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
     output$download_clean_csv <- downloadHandler(
       filename = function() .clean_stamp(".csv"),
       content  = function(file) {
-        utils::write.csv(cleaning_state$current_data, file, row.names = FALSE)
+        safe <- if (!is.null(services) && !is.null(services$privacy)) services$privacy$prepare_export(cleaning_state$current_data, "cleaned CSV export") else cleaning_state$current_data
+        utils::write.csv(safe, file, row.names = FALSE)
       }
     )
 
     output$download_clean_xlsx <- downloadHandler(
       filename = function() .clean_stamp(".xlsx"),
       content  = function(file) {
+        safe <- if (!is.null(services) && !is.null(services$privacy)) services$privacy$prepare_export(cleaning_state$current_data, "cleaned Excel export") else cleaning_state$current_data
         if (requireNamespace("openxlsx", quietly = TRUE)) {
-          openxlsx::write.xlsx(cleaning_state$current_data, file)
-        } else if (requireNamespace("writexl", quietly = TRUE)) {
-          writexl::write_xlsx(cleaning_state$current_data, file)
+          openxlsx::write.xlsx(safe, file)
+        } else if (sap_optional_available("writexl")) {
+          sap_optional_call("writexl", "write_xlsx", safe, file, feature = "Excel workbook export")
         } else {
           # Fall back to CSV content so the download never fails outright
-          utils::write.csv(cleaning_state$current_data, file, row.names = FALSE)
+          utils::write.csv(safe, file, row.names = FALSE)
           showNotification(
             "Install 'openxlsx' or 'writexl' for Excel export; wrote CSV instead.",
             type = "warning")
@@ -1220,7 +1380,8 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
     output$download_clean_rds <- downloadHandler(
       filename = function() .clean_stamp(".rds"),
       content  = function(file) {
-        saveRDS(cleaning_state$current_data, file)
+        safe <- if (!is.null(services) && !is.null(services$privacy)) services$privacy$prepare_export(cleaning_state$current_data, "cleaned RDS export") else cleaning_state$current_data
+        saveRDS(safe, file)
       }
     )
 
@@ -1443,7 +1604,7 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       
       var <- input$outlier_var
       if (!(var %in% colnames(df)) || !is.numeric(df[[var]])) {
-        return(plotly::plot_ly())
+        return(sap_empty_plotly("Choose a valid numeric variable to display this chart."))
       }
       
       plotly::plot_ly(
@@ -1465,7 +1626,7 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       
       var <- input$outlier_var
       if (!(var %in% colnames(df)) || !is.numeric(df[[var]])) {
-        return(plotly::plot_ly())
+        return(sap_empty_plotly("Choose a valid numeric variable to display this chart."))
       }
       
       plotly::plot_ly(
@@ -1537,6 +1698,11 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       df <- validate_data_available()
       numeric_cols <- colnames(df)[sapply(df, is.numeric)]
       updateSelectInput(session, "transform_var", choices = numeric_cols)
+      all_cols_tx <- colnames(df)
+      updateSelectInput(session, "math_a",    choices = numeric_cols)
+      updateSelectInput(session, "math_b_var", choices = numeric_cols)
+      updateSelectInput(session, "cat_var",   choices = numeric_cols)
+      updateSelectInput(session, "cond_var",  choices = all_cols_tx)
     })
     
     # Original distribution
@@ -1546,7 +1712,7 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       
       var <- input$transform_var
       if (!(var %in% colnames(df)) || !is.numeric(df[[var]])) {
-        return(plotly::plot_ly())
+        return(sap_empty_plotly("Choose a valid numeric variable to display this chart."))
       }
       
       plotly::plot_ly(
@@ -1573,7 +1739,7 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       trans <- input$transformation
       
       if (!(var %in% colnames(df)) || !is.numeric(df[[var]])) {
-        return(plotly::plot_ly())
+        return(sap_empty_plotly("Choose a valid numeric variable to display this chart."))
       }
       
       transformed <- tryCatch({
@@ -1583,15 +1749,7 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       })
       
       if (is.null(transformed)) {
-        return(plotly::plot_ly() %>%
-          plotly::layout(
-            title = "Transformation not applicable",
-            annotations = list(
-              text = "This transformation cannot be applied to this variable",
-              x = 0.5, y = 0.5,
-              showarrow = FALSE
-            )
-          ))
+        return(sap_empty_plotly("This transformation cannot be applied to the selected variable."))
       }
       
       transformed <- transformed[!is.na(transformed)]
@@ -1650,6 +1808,194 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       
       showNotification(sprintf("✓ Created new column '%s'", new_col_name), 
                       type = "message")
+    })
+
+    # =========================================================================
+    # TRANSFORMATIONS (extended): headers, math, categorize, conditional.
+    # Each has Preview + Apply. Apply commits through the SAME history +
+    # current_data pattern as the existing transforms, so undo and the
+    # auto-propagation to services$data keep working.
+    # =========================================================================
+
+    .commit_tx <- function(new_df, operation, description) {
+      cleaning_state$history[[length(cleaning_state$history) + 1]] <- list(
+        operation = operation, data = cleaning_state$current_data,
+        description = description)
+      cleaning_state$history_index <- length(cleaning_state$history)
+      cleaning_state$current_data  <- new_df
+      showNotification(sprintf("✓ %s", description), type = "message")
+    }
+
+    .tx_preview_ui <- function(df, new_vals, note, src_cols) {
+      keep <- utils::head(seq_len(nrow(df)), 8)
+      tab  <- df[keep, intersect(src_cols, names(df)), drop = FALSE]
+      tab[["-> new"]] <- new_vals[keep]
+      div(class = "mt-2",
+        div(class = "small text-muted mb-1", note),
+        tags$div(class = "table-responsive",
+          tags$table(class = "table table-sm table-striped mb-0",
+            tags$thead(tags$tr(lapply(names(tab), function(h) tags$th(h)))),
+            tags$tbody(lapply(seq_len(nrow(tab)), function(i)
+              tags$tr(lapply(tab[i, ], function(cell)
+                tags$td(format(cell, digits = 4)))))))))
+    }
+
+    .compute_math_tx <- function(df) {
+      a <- input$math_a; op <- input$math_op
+      if (is.null(a) || !a %in% names(df)) return(list(ok = FALSE, error = "Pick variable A."))
+      va <- df[[a]]
+      if (identical(input$math_b_kind, "const")) {
+        vb <- input$math_b_const %||% NA; b_label <- as.character(vb)
+      } else {
+        b <- input$math_b_var
+        if (is.null(b) || !b %in% names(df)) return(list(ok = FALSE, error = "Pick variable B."))
+        vb <- df[[b]]; b_label <- b
+      }
+      res <- tryCatch(switch(op, add = va + vb, subtract = va - vb, multiply = va * vb,
+        divide = va / vb, modulus = va %% vb, power = va ^ vb,
+        pct = va / sum(va, na.rm = TRUE) * 100, va + vb), error = function(e) NULL)
+      if (is.null(res)) return(list(ok = FALSE, error = "Computation failed."))
+      list(ok = TRUE, value = res,
+           note = sprintf("%s %s %s", a, op, if (identical(op, "pct")) "" else b_label))
+    }
+
+    .compute_cat_tx <- function(df) {
+      v <- input$cat_var
+      if (is.null(v) || !v %in% names(df) || !is.numeric(df[[v]]))
+        return(list(ok = FALSE, error = "Pick a numeric variable."))
+      x <- df[[v]]; method <- input$cat_method; breaks <- NULL
+      if (identical(method, "manual")) {
+        breaks <- suppressWarnings(as.numeric(trimws(strsplit(input$cat_breaks %||% "", ",")[[1]])))
+        breaks <- breaks[!is.na(breaks)]
+        if (length(breaks) < 2) return(list(ok = FALSE, error = "Enter at least 2 breakpoints."))
+      } else {
+        n <- input$cat_n %||% 4
+        if (is.na(n) || n < 2) return(list(ok = FALSE, error = "Groups must be >= 2."))
+        if (identical(method, "width")) {
+          breaks <- seq(min(x, na.rm = TRUE), max(x, na.rm = TRUE), length.out = n + 1)
+        } else {
+          breaks <- stats::quantile(x, probs = seq(0, 1, length.out = n + 1), na.rm = TRUE)
+        }
+        breaks <- unique(breaks)
+        if (length(breaks) < 2) return(list(ok = FALSE, error = "Not enough distinct values."))
+      }
+      res <- tryCatch(cut(x, breaks = breaks, include.lowest = TRUE), error = function(e) NULL)
+      if (is.null(res)) return(list(ok = FALSE, error = "Binning failed."))
+      list(ok = TRUE, value = as.character(res),
+           note = sprintf("%d groups from %s", length(breaks) - 1, v))
+    }
+
+    .compute_cond_tx <- function(df) {
+      v <- input$cond_var
+      if (is.null(v) || !v %in% names(df)) return(list(ok = FALSE, error = "Pick a variable."))
+      x <- df[[v]]; raw <- input$cond_value %||% ""
+      num_val <- suppressWarnings(as.numeric(raw))
+      use_num <- is.numeric(x) && !is.na(num_val)
+      cmp <- if (use_num) x else as.character(x)
+      rhs <- if (use_num) num_val else raw
+      cond <- tryCatch(switch(input$cond_op, ge = cmp >= rhs, gt = cmp > rhs,
+        le = cmp <= rhs, lt = cmp < rhs, eq = cmp == rhs, ne = cmp != rhs,
+        cmp == rhs), error = function(e) NULL)
+      if (is.null(cond)) return(list(ok = FALSE, error = "Condition failed."))
+      res <- ifelse(is.na(cond), NA, ifelse(cond, input$cond_then %||% "TRUE",
+                                            input$cond_else %||% "FALSE"))
+      list(ok = TRUE, value = res, note = sprintf("if %s %s %s", v, input$cond_op, raw))
+    }
+
+    .header_result_tx <- function(df) {
+      if (identical(input$header_action, "promote")) {
+        if (nrow(df) < 1) return(list(ok = FALSE, error = "No rows to promote."))
+        new_names <- as.character(unlist(df[1, ], use.names = FALSE))
+        new_names <- make.unique(make.names(trimws(new_names)))
+        out <- df[-1, , drop = FALSE]; names(out) <- new_names; rownames(out) <- NULL
+        out[] <- lapply(out, function(col) {
+          num <- suppressWarnings(as.numeric(col))
+          if (!all(is.na(num)) && sum(is.na(num)) == sum(is.na(col))) num else col
+        })
+        list(ok = TRUE, df = out,
+             note = sprintf("Promoted row 1 to headers; %d columns", ncol(out)))
+      } else {
+        nm <- trimws(strsplit(input$header_manual %||% "", ",")[[1]]); nm <- nm[nzchar(nm)]
+        if (length(nm) != ncol(df))
+          return(list(ok = FALSE, error = sprintf("Provide exactly %d names (got %d).", ncol(df), length(nm))))
+        out <- df; names(out) <- make.unique(make.names(nm))
+        list(ok = TRUE, df = out, note = sprintf("Renamed %d columns", ncol(out)))
+      }
+    }
+
+    # ---- HEADERS ----
+    observeEvent(input$btn_header_preview, {
+      df <- validate_data_available(); r <- .header_result_tx(df)
+      output$header_preview <- renderUI({
+        if (!isTRUE(r$ok)) return(div(class = "alert alert-warning mt-2", r$error))
+        old <- names(df); new <- names(r$df)
+        div(class = "mt-2", div(class = "small text-muted mb-1", r$note),
+          tags$table(class = "table table-sm mb-0",
+            tags$thead(tags$tr(tags$th("Old"), tags$th("New"))),
+            tags$tbody(lapply(seq_along(new), function(i)
+              tags$tr(tags$td(tags$code(if (i <= length(old)) old[i] else "")),
+                      tags$td(tags$code(new[i])))))))
+      })
+    })
+    observeEvent(input$btn_header_apply, {
+      df <- validate_data_available(); r <- .header_result_tx(df)
+      if (!isTRUE(r$ok)) { showNotification(r$error, type = "error"); return() }
+      .commit_tx(r$df, "headers", r$note); output$header_preview <- renderUI(NULL)
+    })
+
+    # ---- MATH ----
+    observeEvent(input$btn_math_preview, {
+      df <- validate_data_available(); r <- .compute_math_tx(df)
+      output$math_preview <- renderUI({
+        if (!isTRUE(r$ok)) return(div(class = "alert alert-warning mt-2", r$error))
+        src <- c(input$math_a, if (identical(input$math_b_kind, "var")) input$math_b_var)
+        .tx_preview_ui(df, r$value, r$note, src)
+      })
+    })
+    observeEvent(input$btn_math_apply, {
+      df <- validate_data_available(); r <- .compute_math_tx(df)
+      if (!isTRUE(r$ok)) { showNotification(r$error, type = "error"); return() }
+      nm <- trimws(input$math_name %||% ""); if (!nzchar(nm)) nm <- paste0("new_", input$math_op)
+      nm <- make.unique(c(names(df), make.names(nm)))[length(names(df)) + 1]
+      df[[nm]] <- r$value
+      .commit_tx(df, "math", sprintf("Created %s (%s)", nm, r$note))
+      output$math_preview <- renderUI(NULL)
+    })
+
+    # ---- CATEGORIZE ----
+    observeEvent(input$btn_cat_preview, {
+      df <- validate_data_available(); r <- .compute_cat_tx(df)
+      output$cat_preview <- renderUI({
+        if (!isTRUE(r$ok)) return(div(class = "alert alert-warning mt-2", r$error))
+        .tx_preview_ui(df, r$value, r$note, input$cat_var)
+      })
+    })
+    observeEvent(input$btn_cat_apply, {
+      df <- validate_data_available(); r <- .compute_cat_tx(df)
+      if (!isTRUE(r$ok)) { showNotification(r$error, type = "error"); return() }
+      nm <- trimws(input$cat_name %||% ""); if (!nzchar(nm)) nm <- paste0(input$cat_var, "_group")
+      nm <- make.unique(c(names(df), make.names(nm)))[length(names(df)) + 1]
+      df[[nm]] <- r$value
+      .commit_tx(df, "categorize", sprintf("Created %s (%s)", nm, r$note))
+      output$cat_preview <- renderUI(NULL)
+    })
+
+    # ---- CONDITIONAL ----
+    observeEvent(input$btn_cond_preview, {
+      df <- validate_data_available(); r <- .compute_cond_tx(df)
+      output$cond_preview <- renderUI({
+        if (!isTRUE(r$ok)) return(div(class = "alert alert-warning mt-2", r$error))
+        .tx_preview_ui(df, r$value, r$note, input$cond_var)
+      })
+    })
+    observeEvent(input$btn_cond_apply, {
+      df <- validate_data_available(); r <- .compute_cond_tx(df)
+      if (!isTRUE(r$ok)) { showNotification(r$error, type = "error"); return() }
+      nm <- trimws(input$cond_name %||% ""); if (!nzchar(nm)) nm <- paste0(input$cond_var, "_cond")
+      nm <- make.unique(c(names(df), make.names(nm)))[length(names(df)) + 1]
+      df[[nm]] <- r$value
+      .commit_tx(df, "conditional", sprintf("Created %s (%s)", nm, r$note))
+      output$cond_preview <- renderUI(NULL)
     })
     
     # =========================================================================
@@ -1964,6 +2310,24 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
       }
     })
     # =========================================================================
+    # AI INTERPRETATION (Phase B: Data Cleaning)
+    # Anchor: the cleaning log. Payload is the structured step/operation table —
+    # useful for a data-quality narrative of what was done to the data.
+    # =========================================================================
+    mod_ai_assistant_server(
+      "ai_cleaning", services,
+      payload = function() {
+        df <- tryCatch(cleaning_history_df(), error = function(e) NULL)
+        if (is.null(df) || nrow(df) == 0) return(NULL)
+        list(
+          analysis_type = "Data cleaning log / data quality steps",
+          results = df,
+          metadata = list(n_steps = nrow(df))
+        )
+      },
+      default_style = "Research Report")
+
+    # =========================================================================
     # ADD TO REPORT
     # =========================================================================
 
@@ -1985,4 +2349,4 @@ mod_data_cleaning_server <- function(id, app_state, services = NULL) {
 # END OF MODULE 3: DATA CLEANING
 # =============================================================================
 
-message("[SAP] Data Cleaning v2.5-20260708 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Data Cleaning v5.1.0 with Guided Studio loaded")  # SAP_MODULE_BANNER

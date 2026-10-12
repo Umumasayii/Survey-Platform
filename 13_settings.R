@@ -1,17 +1,9 @@
 # =============================================================================
 # MODULE 13: SETTINGS
 # =============================================================================
-# A configuration page wired to the backend SettingsService (00_services.R).
-# The module NEVER stores settings itself — it reads/writes through
-# services$settings (get/set/all/reset), which persists to sap_settings.rds.
-#
-# Scope discipline:
-#   - Controls exist for settings that are actually consumed somewhere in the
-#     app today (theme, decimals, confidence/significance, import defaults,
-#     ML split, seed, correlation method).
-#   - Sections the spec lists but that aren't wired yet (backup, security,
-#     full reporting template designer) are shown as clearly-labelled
-#     "planned" placeholders rather than fake toggles that do nothing.
+# A configuration page wired to the per-user backend SettingsService
+# (00_services.R). Every visible control is consumed by the running app; there
+# are no decorative or "coming soon" toggles.
 #
 # Live application:
 #   - Theme changes call session$setCurrentTheme() immediately.
@@ -54,14 +46,11 @@ mod_settings_ui <- function(id) {
         title = tagList(icon("sliders"), " General"),
         div(class = "card", div(class = "card-body",
           h5("General"),
-          p("Number formatting and application defaults.",
+          p("Number formatting and guarded import limits.",
             class = "text-muted small"),
           hr(),
           sliderInput(ns("decimal_places"), "Decimal places",
                       min = 0, max = 8, value = 3, step = 1),
-          selectInput(ns("date_format"), "Preferred date format",
-                      choices = c("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y",
-                                  "%d-%m-%Y", "%Y/%m/%d")),
           numericInput(ns("max_file_size"), "Max import file size (MB)",
                        value = 100, min = 1, max = 2000, step = 10)
         ))
@@ -72,21 +61,23 @@ mod_settings_ui <- function(id) {
         title = tagList(icon("palette"), " Appearance"),
         div(class = "card", div(class = "card-body",
           h5("Appearance"),
-          p("Theme is applied immediately across the app.",
+          p("Theme, accent, density, and type scale apply immediately.",
             class = "text-muted small"),
           hr(),
           radioButtons(ns("theme_mode"), "Theme",
                        choices = c("Light" = "light", "Dark" = "dark"),
                        inline = TRUE),
-          selectInput(ns("chart_palette"), "Default chart palette",
-                      choices = c("Viridis" = "viridis",
-                                  "Blues" = "blues",
-                                  "Set2 (qualitative)" = "set2",
-                                  "Okabe-Ito (colorblind-safe)" = "okabe")),
-          div(class = "alert alert-light border small mt-2",
-              icon("circle-info"),
-              " Accent colour, density, and font-size controls are planned; ",
-              "theme + palette are live now.")
+          selectInput(ns("accent_color"), "Accent colour",
+                      choices = c("Classic blue" = "blue",
+                                  "Signal teal" = "teal",
+                                  "Nexus violet" = "violet",
+                                  "Coral pulse" = "coral")),
+          radioButtons(ns("interface_density"), "Interface density",
+                       choices = c("Compact" = "compact",
+                                   "Comfortable" = "comfortable",
+                                   "Spacious" = "spacious"), inline = TRUE),
+          sliderInput(ns("font_scale"), "Type scale",
+                      min = 0.85, max = 1.20, value = 1, step = 0.05)
         ))
       ),
 
@@ -100,8 +91,8 @@ mod_settings_ui <- function(id) {
           hr(),
           checkboxInput(ns("imp_clean_names"),
                         "Automatically clean variable names", TRUE),
-          checkboxInput(ns("imp_detect_types"),
-                        "Automatically detect variable types", TRUE),
+          checkboxInput(ns("imp_detect_dates"),
+                        "Automatically detect date-like values", TRUE),
           checkboxInput(ns("imp_trim"),
                         "Automatically trim whitespace", TRUE),
           textInput(ns("imp_missing"),
@@ -117,7 +108,7 @@ mod_settings_ui <- function(id) {
         title = tagList(icon("square-root-variable"), " Statistical"),
         div(class = "card", div(class = "card-body",
           h5("Statistical Defaults"),
-          p("Used as defaults by tests, descriptives, and reports.",
+          p("Used as defaults by correlation tests, models, tables, and power planning.",
             class = "text-muted small"),
           hr(),
           sliderInput(ns("confidence_level"), "Confidence level",
@@ -125,7 +116,8 @@ mod_settings_ui <- function(id) {
           sliderInput(ns("significance_level"), "Significance level (alpha)",
                       min = 0.001, max = 0.10, value = 0.05, step = 0.001),
           selectInput(ns("correlation_method"), "Default correlation method",
-                      choices = c("Pearson" = "pearson",
+                      choices = c("Automatic (normality-aware)" = "auto",
+                                  "Pearson" = "pearson",
                                   "Spearman" = "spearman",
                                   "Kendall" = "kendall"))
         ))
@@ -153,36 +145,78 @@ mod_settings_ui <- function(id) {
         ))
       ),
 
-      # --- REPORTING ------------------------------------------------------
+      # --- AI ASSISTANT ---------------------------------------------------
       nav_panel(
-        title = tagList(icon("file-lines"), " Reporting"),
+        title = tagList(icon("wand-magic-sparkles"), " AI Assistant"),
         div(class = "card", div(class = "card-body",
-          h5("Reporting Preferences"),
-          p("Default sections included in generated reports.",
-            class = "text-muted small"),
-          hr(),
-          checkboxGroupInput(ns("report_sections"),
-            "Include by default:",
-            choices = c(
-              "Cover page"            = "cover",
-              "Dataset overview"      = "overview",
-              "Data quality summary"  = "quality",
-              "Descriptive statistics"= "descriptives",
-              "Frequency tables"      = "frequencies",
-              "Charts"                = "charts",
-              "Statistical tests"     = "tests",
-              "Machine learning"      = "ml",
-              "Generated R code"      = "code",
-              "Session information"   = "session"
+          div(class = "d-flex justify-content-between align-items-start gap-3 flex-wrap",
+            div(
+              h5(class = "mb-1", "Real AI Interpretation Engine"),
+              p(class = "text-muted small mb-0",
+                "Use Ollama locally, through a protected remote endpoint, or through Ollama Cloud. Analytical modules send structured summaries and variable labels, not respondent-level rows.")
             ),
-            selected = c("cover", "overview", "descriptives", "charts")
+            span(class = "badge text-bg-primary", icon("network-wired"), " Deployment-aware")
           ),
-          textInput(ns("report_author"), "Default report author", ""),
-          textInput(ns("report_org"), "Organisation / institution", "")
+          hr(),
+          fluidRow(
+            column(5, selectInput(ns("ai_provider"), "Provider",
+              choices = c("Ollama (local / remote / cloud)" = "ollama",
+                          "Anthropic Claude" = "anthropic",
+                          "Mock (testing only)" = "mock"),
+              selected = "ollama")),
+            column(7, selectizeInput(ns("ai_model"), "Model",
+              choices = character(0), selected = NULL,
+              options = list(create = TRUE,
+                             placeholder = "Refresh installed models or type a model tag")))
+          ),
+          fluidRow(
+            column(8, textInput(ns("ai_base_url"), "Ollama endpoint (Ollama only)",
+              value = Sys.getenv("OLLAMA_BASE_URL", if (exists("SAP_HOSTED_RUNTIME") && SAP_HOSTED_RUNTIME) "" else "http://localhost:11434"),
+              placeholder = "Local: http://localhost:11434 · Published: reachable HTTPS endpoint")),
+            column(4, div(style = "margin-top:32px;",
+              actionButton(ns("ai_refresh_models"), "Refresh models",
+                           class = "btn-outline-secondary btn-sm w-100",
+                           icon = icon("arrows-rotate"))))
+          ),
+          uiOutput(ns("ai_server_status")),
+          fluidRow(
+            column(8, passwordInput(ns("ai_api_key"), "API key / bearer token",
+              placeholder = "Session-only. Prefer OLLAMA_API_KEY or ANTHROPIC_API_KEY in the environment")),
+            column(4, div(style = "margin-top:32px;",
+              actionButton(ns("ai_test"), "Test connection",
+                           class = "btn-outline-primary btn-sm w-100",
+                           icon = icon("plug"))))
+          ),
+          uiOutput(ns("ai_deployment_guidance")),
+          div(class = "alert alert-light border small py-2",
+              icon("circle-info"), " ",
+              "Model discovery uses /api/tags and generation uses /api/chat. API keys are never persisted; environment variables are recommended, and keys entered here live only for this R session."),
+          tags$details(
+            tags$summary(class = "fw-semibold mb-3", icon("sliders"), " Advanced generation settings"),
+            fluidRow(
+              column(6, sliderInput(ns("ai_temperature"), "Temperature",
+                min = 0, max = 1, value = 0.2, step = 0.1)),
+              column(6, numericInput(ns("ai_max_tokens"), "Maximum response tokens",
+                value = 1200, min = 128, max = 8192, step = 128))
+            ),
+            fluidRow(
+              column(4, numericInput(ns("ai_timeout"), "Request timeout (seconds)",
+                value = 300, min = 30, max = 1800, step = 30)),
+              column(4, numericInput(ns("ai_context_window"), "Context window",
+                value = 4096, min = 1024, max = 131072, step = 1024)),
+              column(4, textInput(ns("ai_keep_alive"), "Keep model loaded", value = "10m"))
+            )
+          ),
+          uiOutput(ns("ai_test_result")),
+          hr(),
+          div(class = "d-flex gap-2 align-items-center flex-wrap",
+            actionButton(ns("ai_save"), "Save AI settings",
+                         class = "btn-primary btn-sm", icon = icon("floppy-disk")),
+            span(class = "small text-muted",
+                 "AI output is a draft and must be reviewed before report insertion.")
+          )
         ))
       ),
-
-      # --- SYSTEM ---------------------------------------------------------
       nav_panel(
         title = tagList(icon("circle-info"), " System"),
         div(class = "card", div(class = "card-body",
@@ -222,25 +256,60 @@ mod_settings_server <- function(id, app_state, services = NULL) {
     # the observers below (which is why we guard writes with a 'ready' flag).
     ready <- reactiveVal(FALSE)
 
-    observeEvent(TRUE, once = TRUE, {
+    accent_map <- list(
+      violet = c(primary = "#5b5bd6", dark = "#4444b8", rgb = "91,91,214"),
+      teal   = c(primary = "#0f9f92", dark = "#0b746b", rgb = "15,159,146"),
+      blue   = c(primary = "#2563eb", dark = "#1d4ed8", rgb = "37,99,235"),
+      coral  = c(primary = "#e85d75", dark = "#c43f5a", rgb = "232,93,117")
+    )
+    apply_appearance <- function(accent, density, scale) {
+      accent <- as.character(accent %||% "blue")[[1]]
+      density <- as.character(density %||% "comfortable")[[1]]
+      accent <- if (accent %in% names(accent_map)) accent else "blue"
+      density <- if (density %in% c("compact", "comfortable", "spacious")) density else "comfortable"
+      scale <- suppressWarnings(as.numeric(scale))[[1]]
+      if (!is.finite(scale)) scale <- 1
+      scale <- min(max(scale, .85), 1.2)
+      palette <- accent_map[[accent]]
+      shinyjs::runjs(sprintf(
+        paste0(
+          "document.documentElement.style.setProperty('--nexus-primary','%s');",
+          "document.documentElement.style.setProperty('--nexus-primary-dark','%s');",
+          "document.documentElement.style.setProperty('--nexus-primary-rgb','%s');",
+          "document.documentElement.style.setProperty('--nexus-font-scale','%.2f');",
+          "document.body.classList.remove('nexus-density-compact','nexus-density-comfortable','nexus-density-spacious');",
+          "document.body.classList.add('nexus-density-%s');"
+        ), palette[["primary"]], palette[["dark"]], palette[["rgb"]], scale, density
+      ))
+      invisible(TRUE)
+    }
+
+    settings_identity <- reactive({
+      if (!is.null(services) && !is.null(services$auth)) services$auth$version()
+      app_state$current_user
+    })
+
+    observeEvent(settings_identity(), {
+      ready(FALSE)
       g <- function(k, d) .settings_get(services, k, d)
 
       updateSliderInput(session, "decimal_places",
                         value = g("decimal_places", 3))
-      updateSelectInput(session, "date_format",
-                        selected = g("date_format",
-                                     g("date_formats", "%Y-%m-%d")[1]))
       updateNumericInput(session, "max_file_size",
                          value = g("max_file_size", 100))
       updateRadioButtons(session, "theme_mode",
                          selected = g("theme_mode", "light"))
-      updateSelectInput(session, "chart_palette",
-                        selected = g("chart_palette", "viridis"))
+      updateSelectInput(session, "accent_color",
+                        selected = g("accent_color", "blue"))
+      updateRadioButtons(session, "interface_density",
+                         selected = g("interface_density", "comfortable"))
+      updateSliderInput(session, "font_scale",
+                        value = g("font_scale", 1))
 
       updateCheckboxInput(session, "imp_clean_names",
                           value = g("imp_clean_names", TRUE))
-      updateCheckboxInput(session, "imp_detect_types",
-                          value = g("imp_detect_types", TRUE))
+      updateCheckboxInput(session, "imp_detect_dates",
+                          value = g("imp_detect_dates", TRUE))
       updateCheckboxInput(session, "imp_trim", value = g("imp_trim", TRUE))
       updateSelectInput(session, "imp_encoding",
                         selected = g("imp_encoding", "UTF-8"))
@@ -253,7 +322,7 @@ mod_settings_server <- function(id, app_state, services = NULL) {
       updateSliderInput(session, "significance_level",
                         value = g("significance_level", 0.05))
       updateSelectInput(session, "correlation_method",
-                        selected = g("correlation_method", "pearson"))
+                        selected = g("correlation_method", "auto"))
 
       updateSliderInput(session, "ml_split", value = g("ml_split", 0.8))
       updateNumericInput(session, "random_seed",
@@ -261,14 +330,15 @@ mod_settings_server <- function(id, app_state, services = NULL) {
       updateCheckboxInput(session, "ml_autosave",
                           value = g("ml_autosave", FALSE))
 
-      updateCheckboxGroupInput(session, "report_sections",
-        selected = g("report_sections",
-                     c("cover","overview","descriptives","charts")))
-      updateTextInput(session, "report_author", value = g("report_author", ""))
-      updateTextInput(session, "report_org", value = g("report_org", ""))
-
+      app_state$settings <- services$settings$all()
+      if (exists("create_app_theme")) {
+        session$setCurrentTheme(create_app_theme(g("theme_mode", "light")))
+      }
+      apply_appearance(g("accent_color", "blue"),
+                       g("interface_density", "comfortable"),
+                       g("font_scale", 1))
       ready(TRUE)
-    })
+    }, ignoreInit = FALSE)
 
     # -- Generic persist helper --------------------------------------------
     persist <- function(key, value) {
@@ -277,6 +347,7 @@ mod_settings_server <- function(id, app_state, services = NULL) {
       # keep the legacy app_state$settings in sync so un-migrated modules
       # that still read app_state$settings pick up the change too
       app_state$settings[[key]] <- value
+      app_state$last_action <- paste("Updated setting:", key)
       last_saved(sprintf("Saved at %s", format(Sys.time(), "%H:%M:%S")))
     }
 
@@ -290,11 +361,9 @@ mod_settings_server <- function(id, app_state, services = NULL) {
     }
 
     obs("decimal_places",     "decimal_places")
-    obs("date_format",        "date_format")
     obs("max_file_size",      "max_file_size")
-    obs("chart_palette",      "chart_palette")
     obs("imp_clean_names",    "imp_clean_names")
-    obs("imp_detect_types",   "imp_detect_types")
+    obs("imp_detect_dates",   "imp_detect_dates")
     obs("imp_trim",           "imp_trim")
     obs("imp_encoding",       "imp_encoding")
     obs("confidence_level",   "confidence_level")
@@ -303,9 +372,14 @@ mod_settings_server <- function(id, app_state, services = NULL) {
     obs("ml_split",           "ml_split")
     obs("random_seed",        "random_seed")
     obs("ml_autosave",        "ml_autosave")
-    obs("report_sections",    "report_sections")
-    obs("report_author",      "report_author")
-    obs("report_org",         "report_org")
+
+    observeEvent(list(input$accent_color, input$interface_density, input$font_scale), {
+      req(ready())
+      persist("accent_color", input$accent_color)
+      persist("interface_density", input$interface_density)
+      persist("font_scale", as.numeric(input$font_scale))
+      apply_appearance(input$accent_color, input$interface_density, input$font_scale)
+    }, ignoreInit = TRUE)
 
     # missing codes: split the comma-separated text into a character vector
     observeEvent(input$imp_missing, {
@@ -342,11 +416,53 @@ mod_settings_server <- function(id, app_state, services = NULL) {
     })
 
     observeEvent(input$reset_confirm, {
+      ready(FALSE)
       if (!is.null(services) && !is.null(services$settings)) {
         services$settings$reset()          # clears overrides, saves
+        app_state$settings <- services$settings$all()
       }
+      defaults <- if (exists("DEFAULT_SETTINGS")) DEFAULT_SETTINGS else list()
+      updateSliderInput(session, "decimal_places", value = defaults$decimal_places %||% 3)
+      updateNumericInput(session, "max_file_size", value = defaults$max_file_size %||% 100)
+      updateRadioButtons(session, "theme_mode", selected = defaults$theme_mode %||% "light")
+      updateSelectInput(session, "accent_color", selected = defaults$accent_color %||% "blue")
+      updateRadioButtons(session, "interface_density", selected = defaults$interface_density %||% "comfortable")
+      updateSliderInput(session, "font_scale", value = defaults$font_scale %||% 1)
+      updateCheckboxInput(session, "imp_clean_names", value = defaults$imp_clean_names %||% TRUE)
+      updateCheckboxInput(session, "imp_detect_dates", value = defaults$imp_detect_dates %||% TRUE)
+      updateCheckboxInput(session, "imp_trim", value = defaults$imp_trim %||% TRUE)
+      updateSelectInput(session, "imp_encoding", selected = defaults$imp_encoding %||% "UTF-8")
+      updateTextInput(session, "imp_missing", value = paste(defaults$missing_value_labels %||% character(), collapse = ", "))
+      updateSliderInput(session, "confidence_level", value = defaults$confidence_level %||% .95)
+      updateSliderInput(session, "significance_level", value = defaults$significance_level %||% .05)
+      updateSelectInput(session, "correlation_method", selected = defaults$correlation_method %||% "auto")
+      updateSliderInput(session, "ml_split", value = defaults$ml_split %||% .8)
+      updateNumericInput(session, "random_seed", value = defaults$random_seed %||% 123L)
+      updateCheckboxInput(session, "ml_autosave", value = defaults$ml_autosave %||% FALSE)
+      updateSelectInput(session, "ai_provider", selected = defaults$ai_provider %||% "ollama")
+      default_model <- as.character(defaults$ai_model %||% "")
+      updateSelectizeInput(session, "ai_model",
+                           choices = if (nzchar(default_model)) default_model else character(0),
+                           selected = if (nzchar(default_model)) default_model else NULL,
+                           server = TRUE)
+      updateTextInput(session, "ai_base_url", value = defaults$ai_base_url %||% "")
+      updateTextInput(session, "ai_api_key", value = "")
+      if (!is.null(services) && !is.null(services$ai)) services$ai$clear_session_api_key()
+      updateSliderInput(session, "ai_temperature", value = defaults$ai_temperature %||% .2)
+      updateNumericInput(session, "ai_max_tokens", value = defaults$ai_max_tokens %||% 1200L)
+      updateNumericInput(session, "ai_timeout", value = defaults$ai_timeout %||% 300L)
+      updateNumericInput(session, "ai_context_window", value = defaults$ai_context_window %||% 4096L)
+      updateTextInput(session, "ai_keep_alive", value = defaults$ai_keep_alive %||% "10m")
+      app_state$last_action <- "Reset settings to defaults"
+      if (exists("create_app_theme")) {
+        session$setCurrentTheme(create_app_theme(DEFAULT_SETTINGS$theme_mode))
+      }
+      apply_appearance(DEFAULT_SETTINGS$accent_color,
+                       DEFAULT_SETTINGS$interface_density,
+                       DEFAULT_SETTINGS$font_scale)
       removeModal()
-      last_saved("Reset to defaults. Reopen Settings to see values.")
+      session$onFlushed(function() ready(TRUE), once = TRUE)
+      last_saved("Reset to defaults and applied immediately.")
       if (!is.null(services) && !is.null(services$notify)) {
         services$notify$warning("All settings reset to defaults",
                                 module = "settings")
@@ -359,20 +475,232 @@ mod_settings_server <- function(id, app_state, services = NULL) {
       tagList(
         tags$dl(class = "row mb-0",
           tags$dt(class = "col-sm-4", "Application"),
-          tags$dd(class = "col-sm-8", "Survey Analytics Platform v2.2"),
+          tags$dd(class = "col-sm-8", if (exists("SAP_PRESENTATION_VERSION")) SAP_PRESENTATION_VERSION else "Survey Analytics"),
           tags$dt(class = "col-sm-4", "R version"),
           tags$dd(class = "col-sm-8", R.version.string),
           tags$dt(class = "col-sm-4", "Backend services"),
           tags$dd(class = "col-sm-8",
                   if (!is.null(services)) "Active" else "Not wired"),
           tags$dt(class = "col-sm-4", "Settings store"),
-          tags$dd(class = "col-sm-8", "sap_settings.rds")
+          tags$dd(class = "col-sm-8", if (!is.null(app_state$current_user))
+            "PostgreSQL per-user preferences" else "Session preferences (set SAP_SETTINGS_FILE for an optional local file)")
         )
       )
     })
 
+    # ---- AI Assistant settings ------------------------------------------
+    ai_status <- reactiveVal(NULL)
+
+    observeEvent(settings_identity(), {
+      if (is.null(services) || is.null(services$settings)) return(invisible(NULL))
+      s <- services$settings
+      cfg <- tryCatch(services$ai$config(), error = function(e) NULL)
+      provider <- cfg$provider %||% s$get("ai_provider", "ollama")
+      model <- as.character(cfg$model %||% s$get("ai_model", "") %||% "")
+      updateSelectInput(session, "ai_provider", selected = provider)
+      updateSelectizeInput(session, "ai_model",
+        choices = if (nzchar(model)) model else character(0),
+        selected = if (nzchar(model)) model else NULL,
+        server = TRUE)
+      updateTextInput(session, "ai_base_url",
+                      value = cfg$base_url %||% s$get("ai_base_url", ""))
+      updateSliderInput(session, "ai_temperature",
+                        value = as.numeric(s$get("ai_temperature", 0.2)))
+      updateNumericInput(session, "ai_max_tokens",
+                         value = as.integer(s$get("ai_max_tokens", 1200)))
+      updateNumericInput(session, "ai_timeout",
+                         value = as.integer(s$get("ai_timeout", 300)))
+      updateNumericInput(session, "ai_context_window",
+                         value = as.integer(s$get("ai_context_window", 4096)))
+      updateTextInput(session, "ai_keep_alive",
+                      value = s$get("ai_keep_alive", "10m"))
+    }, ignoreInit = FALSE)
+
+    save_ai_from_inputs <- function() {
+      if (is.null(services) || is.null(services$ai)) return(FALSE)
+      services$ai$save_config(
+        provider = input$ai_provider,
+        api_key = input$ai_api_key,
+        model = input$ai_model %||% "",
+        base_url = input$ai_base_url,
+        temperature = input$ai_temperature,
+        max_tokens = input$ai_max_tokens,
+        timeout = input$ai_timeout,
+        num_ctx = input$ai_context_window,
+        keep_alive = input$ai_keep_alive
+      )
+      app_state$settings <- services$settings$all()
+      TRUE
+    }
+
+    refresh_ollama_models <- function(show_notice = FALSE) {
+      if (is.null(services) || is.null(services$ai)) return(invisible(NULL))
+      status <- services$ai$available_models(input$ai_base_url)
+      ai_status(status)
+      app_state$ai_connection_status <- list(
+        state = if (isTRUE(status$ok) && length(status$models %||% character(0))) "ready" else if (isTRUE(status$ok)) "warning" else "error",
+        message = status$error %||% sprintf("%s model(s) available", length(status$models %||% character(0)))
+      )
+      if (!isTRUE(status$ok)) {
+        if (show_notice) showNotification(status$error, type = "error", duration = 8)
+        return(invisible(status))
+      }
+
+      models <- status$models %||% character(0)
+      current <- trimws(as.character(input$ai_model %||% ""))
+      selected <- if (nzchar(current) && current %in% models) {
+        current
+      } else if (length(models)) models[[1]] else NULL
+
+      updateSelectizeInput(session, "ai_model",
+                           choices = models, selected = selected, server = TRUE)
+      if (!is.null(selected) && nzchar(selected)) {
+        services$ai$save_config(model = selected, base_url = status$base_url)
+      }
+      if (show_notice) {
+        if (length(models)) {
+          showNotification(sprintf("Found %d Ollama model%s.",
+                                   length(models), if (length(models) == 1L) "" else "s"),
+                           type = "message")
+        } else {
+          showNotification("The Ollama endpoint is reachable, but no models are available.",
+                           type = "warning", duration = 8)
+        }
+      }
+      invisible(status)
+    }
+
+    output$ai_deployment_guidance <- renderUI({
+      provider <- as.character(input$ai_provider %||% "ollama")
+      if (identical(provider, "mock")) {
+        return(div(class = "alert alert-warning small py-2",
+          icon("flask"), " Mock mode never contacts a model and is only for interface testing."))
+      }
+      if (identical(provider, "anthropic")) {
+        return(div(class = "alert alert-info small py-2",
+          icon("cloud"), " Anthropic uses the API key and model fields. The Ollama endpoint field is ignored."))
+      }
+
+      hosted <- exists("SAP_HOSTED_RUNTIME") && isTRUE(SAP_HOSTED_RUNTIME)
+      base <- trimws(as.character(input$ai_base_url %||% ""))
+      loopback <- grepl("^https?://(localhost|127\\.0\\.0\\.1)(:|/|$)", base, ignore.case = TRUE)
+      if (hosted && (loopback || !nzchar(base))) {
+        return(div(class = "alert alert-danger small py-2",
+          icon("triangle-exclamation"), " ",
+          "Published apps cannot use the Ollama service running on your personal computer through localhost. Set OLLAMA_BASE_URL to a reachable protected endpoint or use https://ollama.com/api with OLLAMA_API_KEY."))
+      }
+      if (hosted) {
+        return(div(class = "alert alert-info small py-2",
+          icon("cloud"), " Published runtime: the Ollama endpoint must be reachable from the hosting service. Prefer HTTPS and authentication."))
+      }
+      div(class = "alert alert-success small py-2",
+          icon("computer"), " Local runtime: http://localhost:11434 can use the Ollama service installed on this computer.")
+    })
+
+    output$ai_server_status <- renderUI({
+      provider <- as.character(input$ai_provider %||% "ollama")
+      if (!identical(provider, "ollama")) {
+        return(div(class = "small text-muted mb-3",
+                   icon("circle-info"), " ",
+                   if (identical(provider, "mock"))
+                     "Mock mode is ready for interface testing."
+                   else "Use Test connection to verify the selected cloud provider."))
+      }
+      status <- ai_status()
+      if (is.null(status)) {
+        return(div(class = "small text-muted mb-3",
+                   icon("server"), " Refresh models to check the configured Ollama endpoint."))
+      }
+      if (!isTRUE(status$ok)) {
+        return(div(class = "alert alert-warning py-2 small",
+                   icon("triangle-exclamation"), " ", status$error))
+      }
+      model_count <- length(status$models %||% character(0))
+      div(class = sprintf("alert %s py-2 small",
+                          if (model_count) "alert-success" else "alert-warning"),
+          icon(if (model_count) "circle-check" else "circle-exclamation"), " ",
+          sprintf("Ollama %s is reachable at %s. %d model%s detected.",
+                  status$version %||% "unknown", status$base_url,
+                  model_count, if (model_count == 1L) "" else "s"))
+    })
+
+    # Paint the Settings page first, then perform a short local health check.
+    session$onFlushed(function() {
+      if (!is.null(services) && !is.null(services$ai) &&
+          identical(services$ai$current_provider(), "ollama")) {
+        try(refresh_ollama_models(FALSE), silent = TRUE)
+      }
+    }, once = TRUE)
+
+    observeEvent(input$ai_provider, {
+      provider <- as.character(input$ai_provider %||% "ollama")
+      if (identical(provider, "ollama")) {
+        refresh_ollama_models(FALSE)
+      } else {
+        ai_status(NULL)
+        default_model <- if (identical(provider, "anthropic"))
+          trimws(Sys.getenv("ANTHROPIC_MODEL", "")) else "mock-1"
+        updateSelectizeInput(
+          session, "ai_model",
+          choices = if (nzchar(default_model)) default_model else character(0),
+          selected = if (nzchar(default_model)) default_model else NULL,
+          server = TRUE
+        )
+      }
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$ai_refresh_models, {
+      if (!identical(input$ai_provider, "ollama")) {
+        showNotification("Select Ollama before refreshing models.",
+                         type = "warning")
+        return(invisible(NULL))
+      }
+      services$ai$save_config(base_url = input$ai_base_url, api_key = input$ai_api_key)
+      refresh_ollama_models(TRUE)
+    })
+
+    observeEvent(input$ai_save, {
+      if (!save_ai_from_inputs()) {
+        showNotification("AI service unavailable.", type = "error")
+        return(invisible(NULL))
+      }
+      updateTextInput(session, "ai_api_key", value = "")
+      app_state$last_action <- "Saved AI settings"
+      showNotification("AI settings saved.", type = "message")
+    })
+
+    observeEvent(input$ai_test, {
+      if (is.null(services) || is.null(services$ai)) return(invisible(NULL))
+      save_ai_from_inputs()
+      updateTextInput(session, "ai_api_key", value = "")
+      res <- services$ai$test_connection()
+      app_state$ai_connection_status <- list(
+        state = if (isTRUE(res$ok)) "ready" else "error",
+        message = res$message %||% "AI connection test completed"
+      )
+      if (!is.null(res$models) || !is.null(res$version) || !isTRUE(res$ok)) {
+        ai_status(list(
+          ok = isTRUE(res$ok),
+          base_url = input$ai_base_url,
+          version = res$version %||% "unknown",
+          models = res$models %||% character(0),
+          error = if (isTRUE(res$ok)) NULL else res$message
+        ))
+      }
+      if (isTRUE(res$ok) && nzchar(res$model %||% "")) {
+        models <- res$models %||% res$model
+        updateSelectizeInput(session, "ai_model",
+                             choices = models, selected = res$model, server = TRUE)
+      }
+      output$ai_test_result <- renderUI({
+        div(class = sprintf("alert %s mt-2 mb-0",
+                            if (isTRUE(res$ok)) "alert-success" else "alert-danger"),
+            icon(if (isTRUE(res$ok)) "circle-check" else "circle-xmark"), " ",
+            res$message)
+      })
+    })
     output$save_status <- renderText(last_saved())
   })
 }
 
-message("[SAP] Settings v2.2-20260706 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Settings v2.7-20260801 loaded")  # SAP_MODULE_BANNER

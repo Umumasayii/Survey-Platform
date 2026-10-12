@@ -1,0 +1,31 @@
+SURVEY ANALYTICS PLATFORM 5.3.1 — ZERO-SQL LAUNCH BUILD
+========================================================
+
+WHAT WAS FIXED
+- Hosted launch no longer installs R packages while Shiny is trying to start.
+- Docker/cloud start uses the hosting platform PORT automatically.
+- PostgreSQL schema and all migration tables are created automatically.
+- If local PostgreSQL is stopped/unreachable, the app opens in a safe local workspace instead of failing launch. Restart after PostgreSQL is available to restore persistent accounts.
+- Local PostgreSQL database nexus_studio is created automatically when the configured local PostgreSQL user has permission.
+- The FIRST account you create in the app becomes an active Administrator automatically.
+- Every later account follows the normal approval workflow and can be managed from Administration > Control Center.
+- No pgAdmin SQL scripts are required for normal setup.
+
+LOCAL RSTUDIO
+1. Make sure PostgreSQL is installed and its service is running on localhost:5432.
+2. Open this folder as your working folder/project.
+3. Click Run App in RStudio.
+4. Click Create account. Use a passphrase of at least 15 characters.
+5. The first account becomes Administrator and signs in immediately.
+6. Open Administration > Control Center to view/approve/manage users.
+
+DOCKER / SELF-CONTAINED SERVER
+- This ZIP includes docker-compose.yml plus a local .env, so PostgreSQL + the app initialise automatically.
+- No manual schema creation or first-admin SQL is required.
+
+PUBLISHING FROM RSTUDIO / RSCONNECT
+- .Renviron and .env are intentionally excluded from publishing because they contain local secrets and localhost PostgreSQL cannot be reached from a cloud server.
+- A generic cloud publish therefore starts safely without attempting the local database. If your host injects a standard DATABASE_URL when you attach PostgreSQL, this build detects it automatically. Otherwise set the SAP_PG_* connection values in the host settings. No SQL is needed: once a database connection is present, the app creates its schema/tables and the first registered account becomes Administrator.
+
+IMPORTANT
+- PostgreSQL itself must exist somewhere for persistent multi-user accounts. The app can create its database/schema/tables when it has permission, but an R/Shiny deployment cannot manufacture a remote PostgreSQL server on a hosting provider that does not supply one.

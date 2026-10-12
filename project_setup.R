@@ -24,22 +24,10 @@
 #' @return Invisible logical vector of installation success
 check_packages <- function(verbose = TRUE) {
   
-  required_packages <- c(
-    # Core Shiny
-    "shiny", "bslib", "shinyWidgets", "bsicons", "fontawesome",
-    # Tables & Data Display
-    "DT", "gt", "reactable", "shinycssloaders",
-    # Data Import
-    "readxl", "haven", "jsonlite", "googlesheets4",
-    # Data Wrangling
-    "dplyr", "tidyr", "janitor", "stringr", "forcats",
-    # Dates & Times
-    "lubridate",
-    # Visualization
-    "plotly", "ggplot2",
-    # Statistics & Reporting
-    "gtsummary", "broom", "officer", "rmarkdown"
-  )
+  if (!exists("SAP_CORE_PACKAGES", inherits = TRUE)) {
+    source("package_manifest.R", local = FALSE)
+  }
+  required_packages <- unique(c(SAP_CORE_PACKAGES, SAP_RECOMMENDED_PACKAGES))
   
   installed <- required_packages %in% installed.packages()[, "Package"]
   missing <- required_packages[!installed]
@@ -48,7 +36,7 @@ check_packages <- function(verbose = TRUE) {
     if (verbose) {
       cat("📦 Installing missing packages:", paste(missing, collapse = ", "), "\n")
     }
-    install.packages(missing, dependencies = TRUE)
+    install.packages(missing, dependencies = c("Depends", "Imports", "LinkingTo"))
   }
   
   if (verbose) {
@@ -75,63 +63,67 @@ check_packages <- function(verbose = TRUE) {
 #' head(survey_data)
 #'
 generate_household_survey <- function(n_observations = 500) {
-  
+
+  stopifnot(n_observations >= 10)
   set.seed(12345)
-  
-  data.frame(
-    respondent_id = 1:n_observations,
-    
+
+  df <- data.frame(
+    respondent_id = seq_len(n_observations),
+
     # Demographics
     age = sample(18:80, n_observations, replace = TRUE),
-    gender = sample(c("Male", "Female", "Other"), n_observations, 
+    gender = sample(c("Male", "Female", "Other"), n_observations,
                     replace = TRUE, prob = c(0.48, 0.50, 0.02)),
-    province = sample(c("North", "South", "East", "West", "Central"), 
-                     n_observations, replace = TRUE),
-    
+    province = sample(c("North", "South", "East", "West", "Kigali"),
+                      n_observations, replace = TRUE),
+
     # Education
     education_level = sample(
       c("Primary", "Secondary", "Tertiary", "Post-graduate"),
       n_observations, replace = TRUE,
       prob = c(0.15, 0.40, 0.35, 0.10)
     ),
-    
+
     # Employment
     employment_status = sample(
       c("Employed", "Unemployed", "Self-employed", "Student", "Retired"),
       n_observations, replace = TRUE,
       prob = c(0.55, 0.15, 0.15, 0.10, 0.05)
     ),
-    
-    # Income (USD per month)
-    monthly_income = round(abs(rnorm(n_observations, mean = 1500, sd = 800))),
-    
+
+    # Approximate monthly household income in Rwandan francs.
+    monthly_income_rwf = round(abs(rnorm(n_observations, mean = 180000, sd = 90000)), -3),
+
     # Household
-    household_size = sample(1:8, n_observations, replace = TRUE,
-                           prob = c(0.10, 0.15, 0.20, 0.20, 0.15, 0.12, 0.05, 0.03)),
-    
-    # Likert scale responses (1-5)
+    household_size = sample(
+      1:8, n_observations, replace = TRUE,
+      prob = c(0.10, 0.15, 0.20, 0.20, 0.15, 0.12, 0.05, 0.03)
+    ),
+
+    # Likert and access responses
     satisfied_healthcare = sample(1:5, n_observations, replace = TRUE),
     satisfied_education = sample(1:5, n_observations, replace = TRUE),
-    access_water = sample(0:1, n_observations, replace = TRUE),
-    
-    # Dates
-    survey_date = seq(from = as.Date("2023-01-01"), 
-                     by = "days", 
-                     length.out = n_observations),
-    
-    # Missing values (realistic patterns)
-    income_missing = sample(c(NA_real_, NA_real_, NA_real_, 
-                              NA_real_, NA_character_), 
-                           n_observations)[1:n_observations]
-  ) %>%
-    # Introduce some missing values
-    dplyr::mutate(
-      monthly_income = ifelse(is.na(income_missing) | runif(n_observations) < 0.05,
-                             NA_real_, monthly_income),
-      satisfied_healthcare = ifelse(runif(n_observations) < 0.08, NA_real_, 
-                                    satisfied_healthcare)
-    ) %>%
-    dplyr::select(-income_missing)
+    access_improved_water = sample(c("Yes", "No"), n_observations,
+                                   replace = TRUE, prob = c(0.78, 0.22)),
+
+    survey_date = as.Date("2025-01-01") + sample(0:180, n_observations, replace = TRUE),
+    stringsAsFactors = FALSE
+  )
+
+  # Realistic missingness: enough for the Quality Center demonstration without
+  # making any variable unusable.
+  df$monthly_income_rwf[runif(n_observations) < 0.07] <- NA_real_
+  df$satisfied_healthcare[runif(n_observations) < 0.05] <- NA_integer_
+  df$education_level[runif(n_observations) < 0.02] <- NA_character_
+
+  # A small number of exact duplicate submissions gives the cleaning demo a
+  # predictable issue to detect and remove.
+  n_duplicates <- max(2L, floor(n_observations * 0.01))
+  duplicate_targets <- sample(2:n_observations, n_duplicates)
+  duplicate_sources <- pmax(1L, duplicate_targets - 1L)
+  df[duplicate_targets, ] <- df[duplicate_sources, ]
+
+  df
 }
 
 #' Generate Health Survey Dataset
@@ -266,7 +258,7 @@ project_status <- function() {
   cat("═══════════════════════════════════════════════════════════\n\n")
   
   # Check files
-  files_created <- c("app.R", "global.R", "README.md", "DEVELOPMENT.md")
+  files_created <- c("app.R", "auth.R", "global_no_gtsummary.R", "README.md", "CHECK_APP.R")
   files_exist <- file.exists(files_created)
   
   cat("📁 Project Files:\n")
@@ -319,7 +311,7 @@ test_variable_detection <- function() {
   cat("Testing variable type detection...\n")
   
   # Load global utilities
-  source("global.R", echo = FALSE)
+  source("global_no_gtsummary.R", echo = FALSE)
   
   # Create test data
   test_data <- data.frame(
@@ -356,7 +348,7 @@ test_data_cleaning <- function() {
   
   cat("Testing data cleaning functions...\n")
   
-  source("global.R", echo = FALSE)
+  source("global_no_gtsummary.R", echo = FALSE)
   
   # Create test data with issues
   test_data <- data.frame(
@@ -395,7 +387,7 @@ test_data_cleaning <- function() {
 
 cat("\n")
 cat("╔════════════════════════════════════════════════════════════╗\n")
-cat("║   Survey Analytics Platform - Development Environment     ║\n")
+cat("║         Survey Analytics - Development Environment        ║\n")
 cat("╚════════════════════════════════════════════════════════════╝\n\n")
 
 cat("Available commands:\n\n")

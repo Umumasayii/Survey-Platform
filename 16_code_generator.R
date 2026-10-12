@@ -309,7 +309,7 @@ mod_code_generator_ui <- function(id) {
 # SERVER FUNCTION
 # =============================================================================
 
-mod_code_generator_server <- function(id, app_state) {
+mod_code_generator_server <- function(id, app_state, services = NULL) {
   moduleServer(id, function(input, output, session) {
     
     ns <- session$ns
@@ -340,6 +340,9 @@ mod_code_generator_server <- function(id, app_state) {
         paste0("analysis_", format(Sys.Date(), "%Y%m%d"), ".R")
       },
       content = function(file) {
+        if (!is.null(services) && !is.null(services$privacy)) {
+          services$privacy$assert_content_export_allowed(current_code(), "generated R code export")
+        }
         writeLines(current_code(), file)
       }
     )

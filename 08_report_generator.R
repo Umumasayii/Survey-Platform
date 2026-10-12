@@ -23,6 +23,42 @@
 # ReportService$to_html().
 # =============================================================================
 
+sap_report_plain_text <- function(x, fallback = "Data Analysis Report") {
+  x <- as.character(x %||% fallback)[[1]]
+  x <- trimws(gsub("[[:cntrl:]]+", " ", x))
+  if (!nzchar(x)) x <- fallback
+  substr(x, 1L, 240L)
+}
+
+sap_report_yaml_text <- function(x) {
+  x <- sap_report_plain_text(x)
+  x <- gsub("\\\\", "/", x)
+  gsub('"', "'", x, fixed = TRUE)
+}
+
+sap_report_html_text <- function(x) {
+  x <- sap_report_plain_text(x)
+  x <- gsub("&", "&amp;", x, fixed = TRUE)
+  x <- gsub("<", "&lt;", x, fixed = TRUE)
+  x <- gsub(">", "&gt;", x, fixed = TRUE)
+  x <- gsub('"', "&quot;", x, fixed = TRUE)
+  gsub("'", "&#39;", x, fixed = TRUE)
+}
+
+sap_report_missing_pct <- function(df) {
+  cells <- nrow(df) * ncol(df)
+  if (!is.finite(cells) || cells <= 0) return(NA_real_)
+  100 * sum(is.na(df)) / cells
+}
+
+sap_report_completeness_label <- function(missing_pct) {
+  if (!is.finite(missing_pct)) return("Completeness not estimable")
+  if (missing_pct <= 1) return("Very high observed completeness")
+  if (missing_pct <= 5) return("High observed completeness")
+  if (missing_pct <= 15) return("Moderate missingness")
+  "Substantial missingness — review before inference"
+}
+
 #' Escape a data.frame's cells so they survive a pandoc pipe table.
 sanitize_md_table <- function(x) {
   x <- as.data.frame(x, stringsAsFactors = FALSE)
@@ -106,6 +142,9 @@ report_blocks_rmd <- function() {
 
 generate_pdf_report <- function(df, title = "Data Analysis Report",
                                output_file = NULL, blocks = list(), code = "") {
+  safe_title <- sap_report_yaml_text(title)
+  missing_pct <- sap_report_missing_pct(df)
+  completeness <- sap_report_completeness_label(missing_pct)
   
   if (is.null(output_file)) {
     output_file <- file.path(tempdir(), 
@@ -131,7 +170,7 @@ output:
 
 This report provides comprehensive analysis of your dataset.
 
-Generated: %s | Dataset: %d rows × %d columns | Quality: High
+Generated: %s | Dataset: %d rows × %d columns | Completeness: %.1f%%
 
 ---
 
@@ -143,7 +182,7 @@ Dataset contains %d observations and %d variables across multiple types.
 
 # Data Quality Assessment
 
-Missing Values: %.1f%% | Data Quality: Excellent
+Missing Values: %.1f%% | %s
 
 ---
 
@@ -155,7 +194,7 @@ Analysis follows professional statistical standards and best practices.
 
 # Conclusions
 
-Data is suitable for analysis with no critical quality issues.
+Review the captured analysis, missingness profile, design assumptions, and disclosure controls before drawing conclusions.
 
 ---
 
@@ -167,14 +206,16 @@ Report Generated: %s | R Version: %s
 
 *This is an automated report. See platform for full analysis.*
 ',
-    title,
+    safe_title,
     format(Sys.time(), "%B %d, %Y"),
     format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
     nrow(df),
     ncol(df),
+    100 - missing_pct,
     nrow(df),
     ncol(df),
-    round(sum(is.na(df)) / (nrow(df) * ncol(df)) * 100, 1),
+    missing_pct,
+    completeness,
     format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
     R.version$version.string
   )
@@ -230,6 +271,7 @@ docx_heading <- function(doc, text, level = 1) {
 
 generate_word_report <- function(df, title = "Data Analysis Report",
                                  output_file = NULL, blocks = list(), code = "") {
+  title <- sap_report_plain_text(title)
 
   if (is.null(output_file)) {
     output_file <- file.path(tempdir(),
@@ -259,9 +301,10 @@ generate_word_report <- function(df, title = "Data Analysis Report",
                                         nrow(df), ncol(df)))
 
     doc <- docx_heading(doc, "Data Quality Assessment", 2)
-    missing_pct <- round(sum(is.na(df)) / (nrow(df) * ncol(df)) * 100, 1)
+    missing_pct <- sap_report_missing_pct(df)
+    completeness <- sap_report_completeness_label(missing_pct)
     doc <- officer::body_add_par(doc,
-      sprintf("Missing Values: %.1f%% | Overall Quality: High", missing_pct))
+      sprintf("Missing Values: %.1f%% | %s", missing_pct, completeness))
 
     # ---- Captured "Add to Report" blocks --------------------------------
     doc <- docx_heading(doc, "Analysis Results", 1)
@@ -324,9 +367,49 @@ generate_word_report <- function(df, title = "Data Analysis Report",
   })
 }
 
+#' Generate PowerPoint report
+generate_pptx_report <- function(df, title = "Data Analysis Report", output_file = NULL,
+                                 blocks = list()) {
+  title <- sap_report_plain_text(title)
+  if (is.null(output_file)) output_file <- file.path(tempdir(), paste0("report_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".pptx"))
+  if (!requireNamespace("officer", quietly = TRUE)) return(invisible(NULL))
+  tryCatch({
+    ppt <- officer::read_pptx()
+    ppt <- officer::add_slide(ppt, layout = "Title Slide", master = "Office Theme")
+    ppt <- officer::ph_with(ppt, value = title, location = officer::ph_location_type(type = "ctrTitle"))
+    ppt <- officer::ph_with(ppt, value = sprintf("Generated %s", format(Sys.time(), "%Y-%m-%d")), location = officer::ph_location_type(type = "subTitle"))
+    ppt <- officer::add_slide(ppt, layout = "Title and Content", master = "Office Theme")
+    ppt <- officer::ph_with(ppt, value = "Dataset overview", location = officer::ph_location_type(type = "title"))
+    overview <- data.frame(Metric = c("Observations", "Variables", "Missing values"), Value = c(format(nrow(df), big.mark=","), format(ncol(df), big.mark=","), sprintf("%.1f%%", sap_report_missing_pct(df))), check.names=FALSE)
+    ppt <- officer::ph_with(ppt, value = overview, location = officer::ph_location_type(type = "body"))
+    if (!length(blocks)) {
+      ppt <- officer::add_slide(ppt, layout = "Title and Content", master = "Office Theme")
+      ppt <- officer::ph_with(ppt, value = "Analysis results", location = officer::ph_location_type(type = "title"))
+      ppt <- officer::ph_with(ppt, value = "No captured report blocks. Use Add to Report on analysis outputs before exporting.", location = officer::ph_location_type(type = "body"))
+    } else {
+      for (b in blocks) {
+        ppt <- officer::add_slide(ppt, layout = "Title and Content", master = "Office Theme")
+        ppt <- officer::ph_with(ppt, value = b$title %||% "Result", location = officer::ph_location_type(type = "title"))
+        if (identical(b$kind, "plot") && !is.null(b$payload) && file.exists(b$payload)) {
+          ppt <- officer::ph_with(ppt, value = officer::external_img(b$payload, width = 8.2, height = 4.5), location = officer::ph_location_type(type = "body"))
+        } else if (identical(b$kind, "table")) {
+          tbl <- utils::head(as.data.frame(b$payload, stringsAsFactors=FALSE), 18L)
+          ppt <- officer::ph_with(ppt, value = tbl, location = officer::ph_location_type(type = "body"))
+        } else {
+          txt <- paste(as.character(b$payload), collapse = "\n")
+          ppt <- officer::ph_with(ppt, value = substr(txt, 1L, 3500L), location = officer::ph_location_type(type = "body"))
+        }
+      }
+    }
+    print(ppt, target = output_file)
+    invisible(output_file)
+  }, error = function(e) { warning("PowerPoint report generation failed: ", e$message); invisible(NULL) })
+}
+
 #' Generate HTML report
 generate_html_report <- function(df, title = "Data Analysis Report",
                                   output_file = NULL, blocks_html = "") {
+  safe_title <- sap_report_html_text(title)
   
   if (is.null(output_file)) {
     output_file <- file.path(tempdir(), 
@@ -337,28 +420,42 @@ generate_html_report <- function(df, title = "Data Analysis Report",
     # Calculate metrics
     numeric_cols <- sum(sapply(df, is.numeric))
     categorical_cols <- sum(sapply(df, function(x) is.factor(x) || is.character(x)))
-    missing_pct <- round(sum(is.na(df)) / (nrow(df) * ncol(df)) * 100, 1)
+    missing_pct <- sap_report_missing_pct(df)
+    completeness <- sap_report_completeness_label(missing_pct)
     
     # Create HTML
     html_content <- sprintf('<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>%s</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css">
   <style>
-    body { font-family: Segoe UI, sans-serif; background-color: #f8f9fa; }
-    .header { background: linear-gradient(135deg, #0d6efd 0%%, #0d6efd 100%%); color: white; padding: 40px; border-radius: 8px; margin-bottom: 30px; }
-    .kpi-card { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #0d6efd; }
-    .section { background: white; padding: 30px; border-radius: 8px; margin-bottom: 30px; }
-    .section h2 { color: #0d6efd; border-bottom: 2px solid #0d6efd; padding-bottom: 15px; margin-bottom: 20px; }
-    table { width: 100%%; border-collapse: collapse; }
-    th { background-color: #0d6efd; color: white; padding: 12px; }
-    td { padding: 12px; border-bottom: 1px solid #eee; }
+    :root { --ink:#172033; --muted:#65708a; --primary:#5b5bd6; --teal:#14b8a6; --line:#e5e9f2; --canvas:#f5f7fb; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:var(--canvas); font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; line-height:1.6; }
+    .report-shell { max-width:1180px; margin:0 auto; padding:28px; }
+    .header { position:relative; overflow:hidden; color:white; padding:52px; border-radius:24px; margin-bottom:24px; background:radial-gradient(circle at 85%% 10%%,rgba(20,184,166,.38),transparent 18rem),linear-gradient(135deg,#11172a,#29265e 58%%,#5b5bd6); box-shadow:0 24px 60px rgba(17,23,42,.22); }
+    .header:after { content:""; position:absolute; width:190px; height:190px; right:-55px; bottom:-90px; border:1px solid rgba(255,255,255,.25); border-radius:50%%; }
+    .header h1 { position:relative; margin:0 0 8px; max-width:780px; font-size:clamp(2rem,5vw,3.6rem); line-height:1.03; letter-spacing:-.045em; }
+    .header p { position:relative; margin:0; color:#dce2ff; }
+    .row { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; }
+    .kpi-card { min-height:126px; padding:20px; border:1px solid var(--line); border-radius:17px; background:white; box-shadow:0 8px 24px rgba(30,41,59,.055); }
+    .kpi-card h6 { margin:0 0 12px; color:var(--muted); font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; }
+    .kpi-card h3 { margin:0; color:var(--ink); font-size:1.55rem; line-height:1.2; }
+    .section { padding:30px; border:1px solid var(--line); border-radius:20px; margin-bottom:18px; background:white; box-shadow:0 10px 30px rgba(30,41,59,.05); }
+    .section h2 { margin:0 0 18px; color:var(--ink); font-size:1.2rem; letter-spacing:-.02em; }
+    table { width:100%%; overflow:hidden; border:1px solid var(--line); border-radius:13px; border-collapse:separate; border-spacing:0; }
+    th { color:white; padding:12px 14px; background:linear-gradient(135deg,var(--primary),#2563eb); text-align:left; }
+    td { padding:12px 14px; border-bottom:1px solid var(--line); }
+    tr:last-child td { border-bottom:0; }
+    details { margin-top:14px; }
+    pre { max-width:100%%; overflow:auto; }
+    @media (max-width:780px) { .report-shell{padding:14px}.header{padding:34px 25px;border-radius:19px}.row{grid-template-columns:repeat(2,1fr)}.section{padding:22px} }
+    @media (max-width:480px) { .row{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
-  <div style="max-width: 1200px; margin: 0 auto; padding: 20px;">
+  <div class="report-shell">
     
     <div class="header">
       <h1>%s</h1>
@@ -394,7 +491,7 @@ generate_html_report <- function(df, title = "Data Analysis Report",
         <div class="col-md-3">
           <div class="kpi-card">
             <h6>Data Quality</h6>
-            <h3>A</h3>
+	      <h3>%s</h3>
           </div>
         </div>
       </div>
@@ -422,7 +519,7 @@ generate_html_report <- function(df, title = "Data Analysis Report",
       <h2>Data Quality</h2>
       <p>Missing Values: %.1f%%</p>
       <p>Completeness: %.1f%%</p>
-      <p>Overall Assessment: Excellent</p>
+	      <p>Observed assessment: %s</p>
     </div>
     
     <div class="section">
@@ -441,22 +538,24 @@ generate_html_report <- function(df, title = "Data Analysis Report",
     
     <div class="section" style="background-color: #f0f0f0;">
       <h2>Technical Information</h2>
-      <p>Generated: %s<br>R Version: %s<br>Platform: Survey Analytics Platform</p>
+      <p>Generated: %s<br>R Version: %s<br>Platform: Survey Analytics Platform 4.1</p>
     </div>
     
   </div>
 </body>
 </html>',
-    title,
-    title,
+    safe_title,
+    safe_title,
     format(Sys.time(), "%B %d, %Y at %H:%M:%S"),
     nrow(df),
     ncol(df),
     missing_pct,
+    completeness,
     numeric_cols,
     categorical_cols,
     missing_pct,
     100 - missing_pct,
+    completeness,
     format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
     R.version$version.string
   )
@@ -583,7 +682,7 @@ mod_report_generator_server <- function(id, app_state, services = NULL) {
           div(class = "card-header", h5("Export Formats")),
           div(class = "card-body",
             div(class = "row",
-              div(class = "col-md-4",
+              div(class = "col-md-3",
                 div(class = "card border-primary",
                   div(class = "card-body text-center",
                     icon("file-pdf", class = "fa-3x text-danger mb-3"),
@@ -592,7 +691,7 @@ mod_report_generator_server <- function(id, app_state, services = NULL) {
                   )
                 )
               ),
-              div(class = "col-md-4",
+              div(class = "col-md-3",
                 div(class = "card border-primary",
                   div(class = "card-body text-center",
                     icon("file-word", class = "fa-3x text-primary mb-3"),
@@ -601,7 +700,16 @@ mod_report_generator_server <- function(id, app_state, services = NULL) {
                   )
                 )
               ),
-              div(class = "col-md-4",
+              div(class = "col-md-3",
+                div(class = "card border-primary",
+                  div(class = "card-body text-center",
+                    icon("file-powerpoint", class = "fa-3x text-warning mb-3"),
+                    h6("PowerPoint"),
+                    downloadButton(ns("export_pptx"), "Download PPTX", class = "btn-warning btn-sm")
+                  )
+                )
+              ),
+              div(class = "col-md-3",
                 div(class = "card border-primary",
                   div(class = "card-body text-center",
                     icon("globe", class = "fa-3x text-info mb-3"),
@@ -634,7 +742,9 @@ mod_report_generator_server <- function(id, app_state, services = NULL) {
       content = function(file) {
         title <- input$report_title %||% "Data Analysis Report"
         tryCatch({
-          pdf_file <- generate_pdf_report(df_data(), title = title,
+          if (!is.null(services) && !is.null(services$privacy)) services$privacy$assert_content_export_allowed(report_blocks(), "PDF report content")
+          safe_df <- if (!is.null(services) && !is.null(services$privacy)) services$privacy$prepare_export(df_data(), "PDF report export") else df_data()
+          pdf_file <- generate_pdf_report(safe_df, title = title,
                                           blocks = report_blocks(),
                                           code   = report_code())
           if (!is.null(pdf_file) && file.exists(pdf_file)) {
@@ -654,7 +764,9 @@ mod_report_generator_server <- function(id, app_state, services = NULL) {
       },
       content = function(file) {
         title <- input$report_title %||% "Data Analysis Report"
-        word_file <- generate_word_report(df_data(), title = title,
+        if (!is.null(services) && !is.null(services$privacy)) services$privacy$assert_content_export_allowed(report_blocks(), "Word report content")
+        safe_df <- if (!is.null(services) && !is.null(services$privacy)) services$privacy$prepare_export(df_data(), "Word report export") else df_data()
+        word_file <- generate_word_report(safe_df, title = title,
                                           blocks = report_blocks(),
                                           code   = report_code())
         if (!is.null(word_file) && file.exists(word_file)) {
@@ -668,15 +780,28 @@ mod_report_generator_server <- function(id, app_state, services = NULL) {
       }
     )
 
+    output$export_pptx <- downloadHandler(
+      filename = function() paste0("report_", format(Sys.Date(), "%Y%m%d"), ".pptx"),
+      content = function(file) {
+        title <- input$report_title %||% "Data Analysis Report"
+        if (!is.null(services) && !is.null(services$privacy)) services$privacy$assert_content_export_allowed(report_blocks(), "PowerPoint report content")
+        safe_df <- if (!is.null(services) && !is.null(services$privacy)) services$privacy$prepare_export(df_data(), "PowerPoint report export") else df_data()
+        ppt_file <- generate_pptx_report(safe_df, title = title, blocks = report_blocks())
+        if (!is.null(ppt_file) && file.exists(ppt_file)) file.copy(ppt_file, file, overwrite = TRUE) else stop("PowerPoint generation failed.")
+      }
+    )
+
     output$export_html <- downloadHandler(
       filename = function() {
         paste0("report_", format(Sys.Date(), "%Y%m%d"), ".html")
       },
       content = function(file) {
         title <- input$report_title %||% "Data Analysis Report"
+        if (!is.null(services) && !is.null(services$privacy)) services$privacy$assert_content_export_allowed(report_blocks(), "HTML report content")
+        safe_df <- if (!is.null(services) && !is.null(services$privacy)) services$privacy$prepare_export(df_data(), "HTML report export") else df_data()
         blocks_html <- if (!is.null(services) && !is.null(services$report))
                          services$report$to_html() else ""
-        generate_html_report(df_data(), title = title, output_file = file,
+        generate_html_report(safe_df, title = title, output_file = file,
                              blocks_html = blocks_html)
       }
     )

@@ -1,48 +1,22 @@
 # =============================================================================
 # MODULE 9: PROJECT MANAGER
 # =============================================================================
-# Professional project workspace:
-# - Create/open/save projects
-# - Restore all state (data, analyses, charts, models)
-# - Project metadata & history
-# - Recent projects
-# 
-# Architecture: Projects stored as RDS with serialized app_state
+# Dual-mode workspace manager:
+#   - Frontend/demo mode: local .sap project files (legacy compatibility)
+#   - Connected mode: PostgreSQL projects shared through owner/editor/reviewer/viewer permissions
 # =============================================================================
 
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-#' Project structure
-#' @return List with project schema
 get_project_schema <- function() {
   list(
-    version = "1.0",
-    created = Sys.time(),
-    modified = Sys.time(),
-    name = "",
-    description = "",
-    raw_data = NULL,
-    processed_data = NULL,
-    variable_types = NULL,
-    data_dictionary = list(),
-    derived_variables = list(),
-    analyses = list(),
-    visualizations = list(),
-    models = list(),
-    predictions = list(),
-    reports = list(),
-    settings = list(),
-    history = data.frame(),
+    version = "1.0", created = Sys.time(), modified = Sys.time(),
+    name = "", description = "", raw_data = NULL, processed_data = NULL,
+    variable_types = NULL, data_dictionary = list(), derived_variables = list(),
+    analyses = list(), visualizations = list(), models = list(), predictions = list(),
+    reports = list(), settings = list(), history = data.frame(),
     dashboard_layout = list()
   )
 }
 
-#' Create new project
-#' @param name Project name
-#' @param description Project description
-#' @return Project object
 create_project <- function(name, description = "") {
   project <- get_project_schema()
   project$name <- name
@@ -52,382 +26,421 @@ create_project <- function(name, description = "") {
   project
 }
 
-#' Save project to disk
-#' @param project Project object
-#' @param path File path
-#' @return Invisibly TRUE
 save_project <- function(project, path) {
   project$modified <- Sys.time()
-  
   tryCatch({
     saveRDS(project, file = path, compress = "xz")
-    return(invisible(TRUE))
+    invisible(TRUE)
   }, error = function(e) {
     warning("Failed to save project: ", e$message)
-    return(invisible(FALSE))
+    invisible(FALSE)
   })
 }
 
-#' Load project from disk
-#' @param path File path
-#' @return Project object or NULL
 load_project <- function(path) {
   tryCatch({
     project <- readRDS(path)
-    
-    # Validate schema
     schema <- get_project_schema()
-    missing_fields <- setdiff(names(schema), names(project))
-    
-    if (length(missing_fields) > 0) {
-      for (field in missing_fields) {
-        project[[field]] <- schema[[field]]
-      }
-    }
-    
-    return(project)
+    for (field in setdiff(names(schema), names(project))) project[[field]] <- schema[[field]]
+    project
   }, error = function(e) {
     warning("Failed to load project: ", e$message)
-    return(NULL)
+    NULL
   })
 }
 
-#' Get list of recent projects
-#' @param project_dir Directory containing projects
-#' @param n Number of recent projects
-#' @return Data frame with project metadata
 get_recent_projects <- function(project_dir = "projects", n = 10) {
-  if (!dir.exists(project_dir)) {
-    return(data.frame())
-  }
-  
+  if (!dir.exists(project_dir)) return(data.frame())
   files <- list.files(project_dir, pattern = "\\.sap$", full.names = TRUE)
-  
-  if (length(files) == 0) {
-    return(data.frame())
-  }
-  
-  # Get file info
-  file_info <- file.info(files)
-  file_info$path <- rownames(file_info)
-  
-  # Sort by modification time
-  file_info <- file_info[order(file_info$mtime, decreasing = TRUE), ]
-  file_info <- file_info[1:min(n, nrow(file_info)), ]
-  
-  # Try to load project names
-  projects <- data.frame(
-    name = basename(file_info$path),
-    path = file_info$path,
-    modified = file_info$mtime,
-    size_mb = round(file_info$size / 1024^2, 2),
+  if (!length(files)) return(data.frame())
+  info <- file.info(files)
+  info$path <- rownames(info)
+  info <- info[order(info$mtime, decreasing = TRUE), , drop = FALSE]
+  info <- head(info, n)
+  data.frame(
+    name = sub("\\.sap$", "", basename(info$path)),
+    path = info$path,
+    modified = info$mtime,
+    size_mb = round(info$size / 1024^2, 2),
     row.names = NULL
   )
-  
-  # Remove .sap extension from name
-  projects$name <- sub("\\.sap$", "", projects$name)
-  
-  projects
 }
 
-#' Add entry to project history
-#' @param history Current history data frame
-#' @param action Action description
-#' @param module Module name
-#' @param details Additional details (optional)
-#' @return Updated history data frame
-add_history_entry <- function(history, action, module, details = "") {
-  entry <- data.frame(
-    timestamp = Sys.time(),
-    module = module,
-    action = action,
-    details = details,
-    stringsAsFactors = FALSE
-  )
-  
-  if (nrow(history) == 0) {
-    return(entry)
-  } else {
-    return(rbind(history, entry))
-  }
-}
-
-#' Project validator
-#' @param project Project object
-#' @return TRUE if valid, character vector of errors otherwise
-validate_project <- function(project) {
-  errors <- character()
-  
-  if (is.null(project$name) || project$name == "") {
-    errors <- c(errors, "Project name is required")
-  }
-  
-  if (!is.data.frame(project$history)) {
-    errors <- c(errors, "Project history is corrupted")
-  }
-  
-  if (length(errors) > 0) {
-    return(errors)
-  } else {
-    return(TRUE)
-  }
-}
-
-# =============================================================================
-# UI FUNCTION
-# =============================================================================
-
-mod_project_manager_ui <- function(id) {
-  ns <- NS(id)
-  
+.sap_project_connected_ui <- function(ns) {
   tagList(
-    # Header
-    div(
-      class = "mb-4",
-      h2(icon("folder"), "Project Manager"),
-      p("Create, open, and manage your analysis projects", class = "text-muted")
-    ),
-    
-    # Tabs
-    navset_tab(
-      # New Project Tab
-      nav_panel(
-        "New Project",
-        div(
-          class = "row",
-          div(class = "col-md-6",
-            div(class = "card",
-              div(class = "card-body",
-                h5("Create New Project"),
-                textInput(ns("new_project_name"), "Project Name:",
-                         placeholder = "e.g., Q1 Sales Survey"),
-                textAreaInput(ns("new_project_desc"), "Description (optional):",
-                            rows = 4,
-                            placeholder = "Enter project description..."),
-                div(class = "d-grid gap-2",
-                  actionButton(ns("btn_create"), "Create Project",
-                             class = "btn-primary")
-                ),
-                hr(),
-                div(class = "alert alert-info alert-sm",
-                  "A new project will be created with the current dataset.",
-                  br(),
-                  "Existing data will not be lost."
-                )
-              )
-            )
+    uiOutput(ns("connection_notice")),
+    div(class = "row g-3",
+      div(class = "col-xl-4",
+        div(class = "card h-100",
+          div(class = "card-body",
+            h5(icon("folder-open"), " Current workspace"),
+            uiOutput(ns("current_project_card")),
+            actionButton(ns("persist_now"), "Save a dataset version now",
+                         icon = icon("floppy-disk"), class = "btn btn-outline-primary w-100")
           )
         )
       ),
-      
-      # Open Project Tab
-      nav_panel(
-        "Open Project",
-        div(
-          class = "card",
-          div(class = "card-header",
-            h5("Recent Projects")
-          ),
+      div(class = "col-xl-8",
+        div(class = "card h-100",
           div(class = "card-body",
-            div(
-              class = "table-responsive",
-              tableOutput(ns("recent_projects_table"))
+            h5(icon("folder-plus"), " Create a project"),
+            fluidRow(
+              column(5, textInput(ns("new_project_name"), "Project name",
+                                  placeholder = "e.g., Household Survey 2026")),
+              column(7, textInput(ns("new_project_desc"), "Description",
+                                  placeholder = "Purpose, wave, population, or client"))
             ),
-            br(),
-            div(
-              class = "form-group",
-              tags$label("Or browse for a project file:"),
-              shinyFilesButton(ns("file_browser"), "Browse Files",
-                             title = "Select project (.sap file)",
-                             multiple = FALSE)
-            )
+            actionButton(ns("btn_create_connected"), "Create and open project",
+                         icon = icon("plus"), class = "btn btn-primary")
           )
         )
+      )
+    ),
+    div(class = "card mt-3",
+      div(class = "card-header d-flex justify-content-between align-items-center",
+        h5(class = "mb-0", icon("database"), " My & shared PostgreSQL projects"),
+        actionButton(ns("refresh_projects"), "Refresh", icon = icon("rotate"),
+                     class = "btn btn-sm btn-outline-secondary")
       ),
-      
-      # Save Project Tab
-      nav_panel(
-        "Save Project",
-        div(
-          class = "row",
-          div(class = "col-md-6",
-            div(class = "card",
-              div(class = "card-body",
-                h5("Save Current Project"),
-                textInput(ns("save_project_name"), "Project Name:"),
-                div(class = "d-grid gap-2 mt-3",
-                  actionButton(ns("btn_save"), "Save Project",
-                             class = "btn-success"),
-                  actionButton(ns("btn_save_as"), "Save As...",
-                             class = "btn-secondary")
-                ),
-                hr(),
-                uiOutput(ns("project_info"))
-              )
+      div(class = "card-body",
+        fluidRow(
+          column(6, selectInput(ns("project_choice"), "Select project", choices = character(0))),
+          column(6,
+            div(class = "d-flex flex-wrap gap-2 mt-4",
+              actionButton(ns("open_connected"), "Open", icon = icon("folder-open"),
+                           class = "btn btn-primary"),
+              actionButton(ns("favourite_connected"), "Favourite", icon = icon("star"),
+                           class = "btn btn-outline-warning"),
+              actionButton(ns("archive_connected"), "Archive", icon = icon("box-archive"),
+                           class = "btn btn-outline-secondary"),
+              actionButton(ns("delete_connected"), "Delete", icon = icon("trash"),
+                           class = "btn btn-outline-danger")
             )
           )
-        )
-      ),
-      
-      # Project History Tab
-      nav_panel(
-        "Project History",
-        div(
-          class = "card",
-          div(class = "card-header",
-            h5("Analysis History")
-          ),
-          div(class = "card-body",
-            div(class = "table-responsive",
-              tableOutput(ns("history_table"))
-            )
-          )
+        ),
+        div(class = "table-responsive", tableOutput(ns("connected_projects_table")))
+      )
+    ),
+    div(class = "card mt-3",
+      div(class = "card-body",
+        h5(icon("pen-to-square"), " Rename current project"),
+        fluidRow(
+          column(5, textInput(ns("rename_project_name"), "New name")),
+          column(5, textInput(ns("rename_project_desc"), "Updated description")),
+          column(2, actionButton(ns("rename_connected"), "Update",
+                                 class = "btn btn-outline-primary mt-4 w-100"))
         )
       )
     )
   )
 }
 
-# =============================================================================
-# SERVER FUNCTION
-# =============================================================================
-
-mod_project_manager_server <- function(id, app_state) {
-  moduleServer(id, function(input, output, session) {
-    
-    ns <- session$ns
-    
-    # Reactive values
-    current_project <- reactiveValues(
-      data = NULL,
-      loaded = FALSE,
-      path = NULL,
-      name = "Untitled Project"
+.sap_project_local_ui <- function(ns) {
+  navset_tab(
+    nav_panel(
+      "New Project",
+      div(class = "row",
+        div(class = "col-md-6",
+          div(class = "card", div(class = "card-body",
+            h5("Create New Project"),
+            textInput(ns("new_project_name_local"), "Project Name:",
+                      placeholder = "e.g., Q1 Sales Survey"),
+            textAreaInput(ns("new_project_desc_local"), "Description (optional):", rows = 4),
+            actionButton(ns("btn_create_local"), "Create Project", class = "btn-primary"),
+            hr(), div(class = "alert alert-info alert-sm",
+                      "Local project files are intended for desktop/demo mode.")
+          ))
+        )
+      )
+    ),
+    nav_panel(
+      "Open Project",
+      div(class = "card", div(class = "card-body",
+        h5("Recent Projects"),
+        tableOutput(ns("recent_projects_table")),
+        shinyFilesButton(ns("file_browser"), "Browse Files",
+                         title = "Select project (.sap file)", multiple = FALSE)
+      ))
+    ),
+    nav_panel(
+      "Save Project",
+      div(class = "row", div(class = "col-md-6",
+        div(class = "card", div(class = "card-body",
+          h5("Save Current Project"),
+          textInput(ns("save_project_name"), "Project Name:"),
+          actionButton(ns("btn_save"), "Save Project", class = "btn-success"),
+          hr(), uiOutput(ns("project_info"))
+        ))
+      ))
     )
-    
-    # Create new project
-    observeEvent(input$btn_create, {
-      req(input$new_project_name != "")
-      
-      project <- create_project(
-        name = input$new_project_name,
-        description = input$new_project_desc
+  )
+}
+
+mod_project_manager_ui <- function(id, connected = FALSE) {
+  ns <- NS(id)
+  tagList(
+    div(class = "mb-4",
+      h2(icon("folder"), "Project Manager"),
+      p(if (isTRUE(connected))
+          "Create, share, and reopen secure PostgreSQL workspaces. Owner/editor/reviewer/viewer permissions control collaboration."
+        else "Create, open, and manage local analysis project files.",
+        class = "text-muted")
+    ),
+    if (isTRUE(connected)) .sap_project_connected_ui(ns) else .sap_project_local_ui(ns)
+  )
+}
+
+.sap_connected_project_server <- function(input, output, session, app_state, services) {
+  ns <- session$ns
+  refresh_tick <- reactiveVal(0L)
+
+  authenticated <- reactive({
+    services$auth$version()
+    isTRUE(services$auth$is_authenticated())
+  })
+
+  projects <- reactive({
+    refresh_tick()
+    services$project$version()
+    services$auth$version()
+    if (!authenticated()) return(data.frame())
+    services$project$list(include_archived = FALSE)
+  })
+
+  observe({
+    dat <- projects()
+    choices <- if (is.data.frame(dat) && nrow(dat)) {
+      stats::setNames(as.character(dat$id), paste0(dat$name,
+        ifelse(dat$is_favourite == 1, " ★", "")))
+    } else character(0)
+    updateSelectInput(session, "project_choice", choices = choices,
+                      selected = if (length(choices)) unname(choices[[1]]) else character(0))
+  })
+
+  output$connection_notice <- renderUI({
+    if (!authenticated()) {
+      div(class = "alert alert-info",
+          icon("circle-info"),
+          strong(" Guest workspace: "),
+          "You may analyse data now. Sign in or create an account from the top bar before creating a durable project.")
+    } else {
+      div(class = "alert alert-success py-2",
+          icon("database"), " PostgreSQL persistence is active for your account.")
+    }
+  })
+
+  output$current_project_card <- renderUI({
+    services$project$version()
+    pid <- app_state$current_project
+    if (is.null(pid)) {
+      return(div(class = "text-muted py-3",
+                 icon("folder-minus"), " No database project is open."))
+    }
+    p <- services$project$current()
+    if (is.null(p)) return(div(class = "alert alert-warning", "The current project is unavailable."))
+    tagList(
+      h4(as.character(p$name[[1]])),
+      p(class = "text-muted", as.character(p$description[[1]] %||% "")),
+      p(class = "mb-1", strong("Project ID: "), as.character(p$id[[1]])),
+      p(class = "mb-1", strong("Modified: "), format(p$modified_at[[1]], "%Y-%m-%d %H:%M")),
+      if (isTRUE(app_state$data_imported) && is.data.frame(app_state$processed_data))
+        p(class = "mb-0", strong("Active data: "),
+          nrow(app_state$processed_data), " rows × ", ncol(app_state$processed_data), " variables")
+    )
+  })
+
+  output$connected_projects_table <- renderTable({
+    dat <- projects()
+    if (!is.data.frame(dat) || !nrow(dat)) {
+      return(data.frame(Status = if (authenticated()) "No projects yet" else "Sign in to view projects",
+                        check.names = FALSE))
+    }
+    data.frame(
+      ID = dat$id,
+      Project = dat$name,
+      Owner = if ("owner_username" %in% names(dat)) dat$owner_username else dat$owner_id,
+      Access = if ("permission" %in% names(dat)) tools::toTitleCase(dat$permission) else "Owner",
+      Favourite = ifelse(dat$is_favourite == 1, "Yes", ""),
+      Modified = format(dat$modified_at, "%Y-%m-%d %H:%M"),
+      stringsAsFactors = FALSE
+    )
+  }, striped = TRUE, hover = TRUE, bordered = FALSE)
+
+  observeEvent(input$refresh_projects, refresh_tick(refresh_tick() + 1L), ignoreInit = TRUE)
+
+  observeEvent(input$btn_create_connected, {
+    if (!authenticated()) {
+      services$notify$warning("Sign in or create an account before creating a durable project.")
+      return()
+    }
+    name <- trimws(input$new_project_name %||% "")
+    if (!nzchar(name)) {
+      services$notify$warning("Enter a project name.")
+      return()
+    }
+    pid <- services$project$create(name, input$new_project_desc %||% "", persist_current = TRUE)
+    if (!is.null(pid)) {
+      updateTextInput(session, "new_project_name", value = "")
+      updateTextInput(session, "new_project_desc", value = "")
+      refresh_tick(refresh_tick() + 1L)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$open_connected, {
+    req(input$project_choice)
+    services$project$open(as.integer(input$project_choice))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$favourite_connected, {
+    req(input$project_choice)
+    id <- as.integer(input$project_choice)
+    dat <- projects()
+    row <- dat[dat$id == id, , drop = FALSE]
+    value <- !(nrow(row) && row$is_favourite[[1]] == 1)
+    if (services$project$favourite(id, value)) refresh_tick(refresh_tick() + 1L)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$archive_connected, {
+    req(input$project_choice)
+    if (services$project$archive(as.integer(input$project_choice), TRUE)) {
+      services$notify$success("Project archived.")
+      refresh_tick(refresh_tick() + 1L)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$delete_connected, {
+    req(input$project_choice)
+    id <- as.integer(input$project_choice)
+    dat <- projects(); row <- dat[dat$id == id, , drop = FALSE]
+    label <- if (nrow(row)) row$name[[1]] else paste("project", id)
+    showModal(modalDialog(
+      title = "Move project to Recycle Bin?",
+      p("The project will be hidden from normal project lists and can be restored from Enterprise Center. Permanent purge remains an explicit second action."),
+      p(strong(label)),
+      easyClose = TRUE,
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton(ns("confirm_delete_connected"), "Move to Recycle Bin",
+                     class = "btn btn-danger")
       )
-      
-      # Add current data if available
-      if (app_state$data_imported) {
-        project$processed_data <- app_state$processed_data
-        project$variable_types <- app_state$variable_types
+    ))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$confirm_delete_connected, {
+    req(input$project_choice)
+    id <- as.integer(input$project_choice)
+    ok <- if (!is.null(pool) && !is.null(app_state$current_user)) {
+      tryCatch({ db_soft_delete_project(pool, id, app_state$current_user); TRUE }, error = function(e) { services$notify$error(conditionMessage(e)); FALSE })
+    } else {
+      services$project$delete(id)
+    }
+    if (isTRUE(ok)) {
+      if (identical(as.integer(app_state$current_project %||% NA_integer_), id)) {
+        app_state$current_project <- NULL
+        app_state$current_project_name <- "Presentation Workspace"
       }
-      
-      current_project$data <- project
-      current_project$loaded <- TRUE
-      current_project$name <- input$new_project_name
-      
-      showNotification(
-        sprintf("Project '%s' created", input$new_project_name),
-        type = "message"
-      )
-    })
-    
-    # Save project
-    observeEvent(input$btn_save, {
-      req(current_project$loaded)
-      req(input$save_project_name != "")
-      
-      # Create projects directory if needed
-      if (!dir.exists("projects")) {
-        dir.create("projects")
-      }
-      
-      project_name <- input$save_project_name
-      project_path <- file.path("projects", paste0(project_name, ".sap"))
-      
-      # Update project with current state
-      project <- current_project$data
+      removeModal()
+      services$notify$success("Project moved to Recycle Bin.")
+      refresh_tick(refresh_tick() + 1L)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$rename_connected, {
+    pid <- app_state$current_project
+    if (is.null(pid)) {
+      services$notify$warning("Open a project first.")
+      return()
+    }
+    name <- trimws(input$rename_project_name %||% "")
+    desc <- trimws(input$rename_project_desc %||% "")
+    if (!nzchar(name) && !nzchar(desc)) {
+      services$notify$warning("Enter a new name or description.")
+      return()
+    }
+    ok <- services$project$rename(pid,
+      name = if (nzchar(name)) name else NULL,
+      description = if (nzchar(desc)) desc else NULL)
+    if (ok) {
+      services$notify$success("Project updated.")
+      refresh_tick(refresh_tick() + 1L)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$persist_now, {
+    if (is.null(app_state$current_project)) {
+      services$notify$warning("Create or open a project first.")
+      return()
+    }
+    df <- app_state$processed_data
+    if (!is.data.frame(df)) df <- app_state$raw_data
+    if (!is.data.frame(df)) {
+      services$notify$warning("No active dataset is available to save.")
+      return()
+    }
+    services$data$set(df, kind = "processed", module = "project_manager",
+                      description = "manual project snapshot",
+                      variable_types = app_state$variable_types)
+    services$notify$success("Dataset version saved.")
+  }, ignoreInit = TRUE)
+}
+
+.sap_local_project_server <- function(input, output, session, app_state) {
+  current_project <- reactiveValues(data = NULL, loaded = FALSE, path = NULL,
+                                    name = "Untitled Project")
+
+  observeEvent(input$btn_create_local, {
+    req(nzchar(input$new_project_name_local))
+    project <- create_project(input$new_project_name_local, input$new_project_desc_local)
+    if (isTRUE(app_state$data_imported)) {
       project$processed_data <- app_state$processed_data
-      project$settings <- app_state$settings
-      project$modified <- Sys.time()
-      
-      success <- save_project(project, project_path)
-      
-      if (success) {
-        current_project$path <- project_path
-        showNotification(
-          sprintf("Project saved to %s", project_path),
-          type = "message"
-        )
-      } else {
-        showNotification(
-          "Failed to save project",
-          type = "error"
-        )
-      }
-    })
-    
-    # Display recent projects
-    output$recent_projects_table <- renderTable({
-      projects <- get_recent_projects()
-      
-      if (nrow(projects) == 0) {
-        return(data.frame(
-          "No projects found" = "Create a new project or open an existing one",
-          check.names = FALSE
-        ))
-      }
-      
-      projects[, c("name", "modified", "size_mb")]
-    })
-    
-    # Display project info
-    output$project_info <- renderUI({
-      if (!current_project$loaded) {
-        return(div(
-          class = "alert alert-info",
-          "No project loaded"
-        ))
-      }
-      
-      project <- current_project$data
-      
-      div(
-        p(strong("Project Name: "), project$name),
-        p(strong("Created: "), format(project$created, "%Y-%m-%d %H:%M:%S")),
-        p(strong("Modified: "), format(project$modified, "%Y-%m-%d %H:%M:%S")),
-        if (!is.null(project$processed_data)) {
-          p(strong("Data: "), nrow(project$processed_data), 
-            " rows × ", ncol(project$processed_data), " columns")
-        }
-      )
-    })
-    
-    # Display history
-    output$history_table <- renderTable({
-      if (!current_project$loaded) {
-        return(data.frame())
-      }
-      
-      history <- current_project$data$history
-      
-      if (nrow(history) == 0) {
-        return(data.frame(
-          "No history" = "Actions will be recorded here",
-          check.names = FALSE
-        ))
-      }
-      
-      history[order(history$timestamp, decreasing = TRUE), ]
-    })
-    
-    # Return reactive project state
-    reactive({
-      current_project$data
-    })
+      project$variable_types <- app_state$variable_types
+    }
+    current_project$data <- project
+    current_project$loaded <- TRUE
+    current_project$name <- input$new_project_name_local
+    showNotification(sprintf("Project '%s' created", input$new_project_name_local), type = "message")
+  })
+
+  observeEvent(input$btn_save, {
+    req(current_project$loaded, nzchar(input$save_project_name))
+    if (!dir.exists("projects")) dir.create("projects")
+    path <- file.path("projects", paste0(input$save_project_name, ".sap"))
+    project <- current_project$data
+    project$processed_data <- app_state$processed_data
+    project$settings <- app_state$settings
+    project$modified <- Sys.time()
+    if (save_project(project, path)) {
+      current_project$path <- path
+      showNotification(sprintf("Project saved to %s", path), type = "message")
+    } else showNotification("Failed to save project", type = "error")
+  })
+
+  output$recent_projects_table <- renderTable({
+    x <- get_recent_projects()
+    if (!nrow(x)) return(data.frame("No projects found" = "Create a new project", check.names = FALSE))
+    x[, c("name", "modified", "size_mb"), drop = FALSE]
+  })
+
+  output$project_info <- renderUI({
+    if (!current_project$loaded) return(div(class = "alert alert-info", "No project loaded"))
+    p <- current_project$data
+    tagList(
+      p(strong("Project Name: "), p$name),
+      p(strong("Created: "), format(p$created, "%Y-%m-%d %H:%M:%S")),
+      if (is.data.frame(p$processed_data))
+        p(strong("Data: "), nrow(p$processed_data), " rows × ", ncol(p$processed_data), " columns")
+    )
   })
 }
 
-# =============================================================================
-# END OF MODULE 9
-# =============================================================================
+mod_project_manager_server <- function(id, app_state, services = NULL, connected = FALSE, pool = NULL) {
+  moduleServer(id, function(input, output, session) {
+    if (isTRUE(connected) && !is.null(services) && !is.null(services$project)) {
+      .sap_connected_project_server(input, output, session, app_state, services)
+    } else {
+      .sap_local_project_server(input, output, session, app_state)
+    }
+  })
+}
 
-message("[SAP] Project Manager v2.2-20260706 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Project Manager v3.0-postgresql-20260801 loaded")

@@ -202,26 +202,27 @@ test_anova <- function(df, var, group_var) {
 #'
 #' @return List with test result
 test_normality <- function(x) {
-  x_clean <- x[!is.na(x)]
-  
+  x_clean <- as.numeric(x[!is.na(x)])
   if (length(x_clean) < 3 || length(x_clean) > 5000) {
-    return(list(
-      is_normal = NA,
-      statistic = NA,
-      p_value = NA,
-      note = "Sample size out of range for Shapiro-Wilk (3-5000)"
-    ))
+    return(list(is_normal = NA, statistic = NA, p_value = NA,
+                note = "Sample size out of range for Shapiro-Wilk (3-5000)"))
   }
-  
-  test_result <- shapiro.test(x_clean)
-  
+  if (length(unique(x_clean)) < 2L) {
+    return(list(is_normal = NA, statistic = NA, p_value = NA,
+                note = "Normality is undefined because all observed values are identical"))
+  }
+  test_result <- tryCatch(stats::shapiro.test(x_clean), error = function(e) NULL)
+  if (is.null(test_result)) {
+    return(list(is_normal = NA, statistic = NA, p_value = NA,
+                note = "Shapiro-Wilk could not be computed for this variable"))
+  }
   list(
-    is_normal = test_result$p.value > 0.05,
-    statistic = test_result$statistic,
+    is_normal = test_result$p.value >= 0.05,
+    statistic = unname(test_result$statistic),
     p_value = test_result$p.value,
-    note = ifelse(test_result$p.value > 0.05,
-                  "Data appears normally distributed (p > 0.05)",
-                  "Data deviates from normality (p < 0.05)")
+    note = ifelse(test_result$p.value >= 0.05,
+                  "Normality is not rejected at alpha = 0.05 (p >= 0.05)",
+                  "Normality is rejected at alpha = 0.05 (p < 0.05)")
   )
 }
 
@@ -236,16 +237,33 @@ test_homogeneity <- function(df, var, group_var) {
   data_clean <- df %>%
     filter(!is.na(!!sym(var)) & !is.na(!!sym(group_var)))
   
-  # Use car::leveneTest if available, else manual
+  # Brown-Forsythe/Levene test using group medians. The base-R fallback keeps
+  # inference available without forcing the heavyweight optional car package.
   tryCatch({
-    test_result <- suppressWarnings(
-      car::leveneTest(as.formula(paste0(var, "~", group_var)),
-                                   data = data_clean))
+    if (nrow(data_clean) < 3L || length(unique(data_clean[[group_var]])) < 2L) {
+      stop("At least two groups and three complete observations are required.", call. = FALSE)
+    }
+    if (sap_optional_available("car")) {
+      test_result <- suppressWarnings(sap_optional_call(
+        "car", "leveneTest", as.formula(paste0(var, "~", group_var)),
+        data = data_clean, feature = "Levene's test"
+      ))
+      statistic <- as.numeric(test_result$`F value`[[1]])
+      p_value <- as.numeric(test_result$`Pr(>F)`[[1]])
+    } else {
+      groups <- factor(data_clean[[group_var]])
+      values <- as.numeric(data_clean[[var]])
+      medians <- stats::ave(values, groups, FUN = stats::median)
+      deviations <- abs(values - medians)
+      anova_table <- stats::anova(stats::lm(deviations ~ groups))
+      statistic <- as.numeric(anova_table$`F value`[[1]])
+      p_value <- as.numeric(anova_table$`Pr(>F)`[[1]])
+    }
     list(
-      equal_variance = test_result$`Pr(>F)`[1] > 0.05,
-      statistic = test_result$`F value`[1],
-      p_value = test_result$`Pr(>F)`[1],
-      note = ifelse(test_result$`Pr(>F)`[1] > 0.05,
+      equal_variance = p_value > 0.05,
+      statistic = statistic,
+      p_value = p_value,
+      note = ifelse(p_value > 0.05,
                     "Equal variances assumed (p > 0.05)",
                     "Variances not equal (p < 0.05)")
     )
@@ -267,33 +285,23 @@ test_homogeneity <- function(df, var, group_var) {
 #'
 #' @return List with correlation result
 test_correlation <- function(x, y, method = "pearson") {
-  x_clean <- x[!is.na(x) & !is.na(y)]
-  y_clean <- y[!is.na(x) & !is.na(y)]
-  
-  if (length(x_clean) < 3) {
-    return(list(error = "Need at least 3 complete pairs"))
-  }
-  
-  test_result <- cor.test(x_clean, y_clean, method = method, conf.level = 0.95)
-  
+  ok <- !is.na(x) & !is.na(y)
+  x_clean <- x[ok]; y_clean <- y[ok]
+  if (length(x_clean) < 3) return(list(error = "Need at least 3 complete pairs"))
+  test_result <- suppressWarnings(stats::cor.test(x_clean, y_clean, method = method, conf.level = 0.95, exact = FALSE))
+  ci <- test_result$conf.int
+  lo <- if (length(ci)) unname(ci[1]) else NA_real_
+  hi <- if (length(ci)) unname(ci[2]) else NA_real_
+  est <- unname(test_result$estimate)
+  method_label <- switch(method, pearson = "Pearson", spearman = "Spearman", kendall = "Kendall", capitalize(method))
+  ci_text <- if (is.finite(lo) && is.finite(hi)) sprintf(", 95%% CI [%.3f, %.3f]", lo, hi) else ""
   list(
-    test = paste0(capitalize(method), " Correlation"),
-    correlation = test_result$estimate,
-    statistic = test_result$statistic,
-    df = test_result$parameter %||% (length(x_clean) - 2),
-    p_value = test_result$p.value,
-    ci_lower = test_result$conf.int[1],
-    ci_upper = test_result$conf.int[2],
-    n = length(x_clean),
-    significant = test_result$p.value < 0.05,
-    interpretation = sprintf(
-      "r = %.3f, p = %.4f, 95%% CI [%.3f, %.3f]. %s",
-      test_result$estimate,
-      test_result$p.value,
-      test_result$conf.int[1],
-      test_result$conf.int[2],
-      ifelse(test_result$p.value < 0.05, "Significant.", "Not significant.")
-    )
+    test = paste0(method_label, " Correlation"), correlation = est,
+    statistic = unname(test_result$statistic), df = unname(test_result$parameter %||% NA_real_),
+    p_value = test_result$p.value, ci_lower = lo, ci_upper = hi,
+    n = length(x_clean), significant = test_result$p.value < 0.05, method = method,
+    interpretation = sprintf("Association = %.3f, p = %.4f%s. %s", est, test_result$p.value, ci_text,
+                             ifelse(test_result$p.value < 0.05, "Significant.", "Not significant."))
   )
 }
 
@@ -311,20 +319,25 @@ test_mann_whitney <- function(x, y) {
     return(list(error = "Need observations in both groups"))
   }
   
-  test_result <- wilcox.test(x_clean, y_clean, conf.int = TRUE)
+  test_result <- suppressWarnings(stats::wilcox.test(x_clean, y_clean, conf.int = TRUE, exact = FALSE))
   
   # Calculate effect size (rank-biserial correlation)
   n1 <- length(x_clean)
   n2 <- length(y_clean)
-  r <- 1 - (2 * test_result$statistic) / (n1 * n2)
+  r <- 1 - (2 * unname(test_result$statistic)) / (n1 * n2)
+  ci <- test_result$conf.int
   
   list(
     test = "Mann-Whitney U Test",
-    u_statistic = test_result$statistic,
+    u_statistic = unname(test_result$statistic),
     p_value = test_result$p.value,
     median1 = median(x_clean),
     median2 = median(y_clean),
+    ci_lower = if (length(ci)) ci[1] else NA_real_,
+    ci_upper = if (length(ci)) ci[2] else NA_real_,
     effect_size = r,
+    effect_label = "Rank-biserial correlation",
+    method_family = "nonparametric",
     n1 = n1,
     n2 = n2,
     significant = test_result$p.value < 0.05,
@@ -377,6 +390,216 @@ test_kruskal_wallis <- function(df, var, group_var) {
       ifelse(test_result$p.value < 0.05, "Significant.", "Not significant.")
     )
   )
+}
+
+
+#' Perform paired Wilcoxon signed-rank test
+#'
+#' Non-parametric alternative to the paired t-test.
+test_wilcoxon_paired <- function(x, y) {
+  x <- as.numeric(x); y <- as.numeric(y)
+  if (length(x) != length(y)) {
+    return(list(error = sprintf("Paired Wilcoxon test needs equal group sizes (got %d and %d)", length(x), length(y))))
+  }
+  ok <- !is.na(x) & !is.na(y); x <- x[ok]; y <- y[ok]
+  if (length(x) < 2) return(list(error = "Need at least two complete pairs"))
+  tr <- suppressWarnings(stats::wilcox.test(x, y, paired = TRUE, exact = FALSE, conf.int = TRUE))
+  d <- x - y
+  # Rank-biserial style effect for paired signed ranks, based on signed rank sums.
+  nz <- d[d != 0 & !is.na(d)]
+  eff <- NA_real_
+  if (length(nz)) {
+    rr <- rank(abs(nz)); wp <- sum(rr[nz > 0]); wn <- sum(rr[nz < 0])
+    eff <- (wp - wn) / (wp + wn)
+  }
+  ci <- tr$conf.int
+  list(
+    test = "Wilcoxon Signed-Rank Test",
+    statistic = unname(tr$statistic), p_value = tr$p.value,
+    median_difference = stats::median(d, na.rm = TRUE),
+    ci_lower = if (length(ci)) ci[1] else NA_real_,
+    ci_upper = if (length(ci)) ci[2] else NA_real_,
+    effect_size = eff, effect_label = "Rank-biserial correlation",
+    n_pairs = length(x), significant = tr$p.value < 0.05,
+    method_family = "nonparametric",
+    interpretation = sprintf("Wilcoxon signed-rank V = %.1f, p = %.4f, rank-biserial r = %s. %s",
+                             unname(tr$statistic), tr$p.value,
+                             ifelse(is.finite(eff), sprintf("%.3f", eff), "NA"),
+                             ifelse(tr$p.value < 0.05, "Significant.", "Not significant."))
+  )
+}
+
+#' Shapiro-Wilk diagnostics appropriate to a group comparison.
+#'
+#' Independent groups are checked within each group. For paired comparisons the
+#' assumption is checked on paired differences, not on the pooled outcome.
+normality_for_group_comparison <- function(df, var, group_var, paired = FALSE) {
+  dat <- df[!is.na(df[[var]]) & !is.na(df[[group_var]]), c(var, group_var), drop = FALSE]
+  g <- droplevels(factor(dat[[group_var]])); lev <- levels(g)
+  if (length(lev) != 2L) return(list(is_normal = NA, summary = "Exactly two groups are required."))
+  x <- dat[[var]][g == lev[1]]; y <- dat[[var]][g == lev[2]]
+  if (isTRUE(paired)) {
+    if (length(x) != length(y)) return(list(is_normal = NA, summary = "Paired normality requires equal group sizes."))
+    nr <- test_normality(x - y)
+    return(list(is_normal = nr$is_normal, p_value = nr$p_value,
+                details = data.frame(Component = "Paired differences", W = nr$statistic, P_value = nr$p_value),
+                summary = if (isTRUE(nr$is_normal)) "Paired differences do not reject normality."
+                          else if (identical(nr$is_normal, FALSE)) "Paired differences reject normality; Wilcoxon signed-rank is recommended."
+                          else nr$note))
+  }
+  res <- lapply(lev, function(z) test_normality(dat[[var]][g == z]))
+  pv <- vapply(res, function(z) z$p_value %||% NA_real_, numeric(1))
+  ok <- vapply(res, function(z) z$is_normal %||% NA, logical(1))
+  decision <- if (any(ok == FALSE, na.rm = TRUE)) FALSE else if (all(ok == TRUE)) TRUE else NA
+  list(is_normal = decision, p_value = suppressWarnings(min(pv, na.rm = TRUE)),
+       details = data.frame(Group = lev, W = vapply(res, function(z) z$statistic %||% NA_real_, numeric(1)), P_value = pv),
+       summary = if (identical(decision, FALSE)) "At least one group rejects normality (p < 0.05); a non-parametric comparison is recommended."
+                 else if (identical(decision, TRUE)) "Neither group rejects normality at alpha = 0.05."
+                 else "Normality could not be determined for every group (Shapiro-Wilk requires 3-5000 observations).")
+}
+
+#' Automatically choose a two-group inferential test.
+auto_two_group_test <- function(df, var, group_var, paired = FALSE, method = "auto") {
+  dat <- df[!is.na(df[[var]]) & !is.na(df[[group_var]]), c(var, group_var), drop = FALSE]
+  g <- droplevels(factor(dat[[group_var]])); lev <- levels(g)
+  if (length(lev) != 2L) return(list(error = "Grouping variable must contain exactly two observed groups"))
+  x <- dat[[var]][g == lev[1]]; y <- dat[[var]][g == lev[2]]
+  nd <- normality_for_group_comparison(dat, var, group_var, paired)
+  use_nonparam <- identical(method, "nonparametric") || (identical(method, "auto") && identical(nd$is_normal, FALSE))
+
+  if (use_nonparam) {
+    res <- if (isTRUE(paired)) test_wilcoxon_paired(x, y) else test_mann_whitney(x, y)
+    if (is.null(res$error)) {
+      res$method_family <- "nonparametric"
+      res$selection_reason <- if (identical(method, "auto")) nd$summary else "Non-parametric method selected manually."
+      res$normality <- nd
+      if (!isTRUE(paired)) {
+        res$effect_label <- "Rank-biserial correlation"
+        res$ci_lower <- res$ci_lower %||% NA_real_; res$ci_upper <- res$ci_upper %||% NA_real_
+      }
+    }
+    return(res)
+  }
+
+  res <- test_t_two_sample(x, y, paired = paired)
+  if (is.null(res$error)) {
+    res$method_family <- "parametric"
+    res$selection_reason <- if (identical(method, "auto")) {
+      if (is.na(nd$is_normal)) "Normality was inconclusive; parametric test retained. Review Q-Q plots and robustness."
+      else "Normality was not rejected; parametric comparison retained. Independent t-tests use Welch's unequal-variance form by default."
+    } else "Parametric method selected manually."
+    res$normality <- nd; res$effect_label <- "Cohen's d"
+  }
+  res
+}
+
+#' Welch one-way ANOVA for unequal variances.
+test_welch_anova <- function(df, var, group_var) {
+  dat <- df[!is.na(df[[var]]) & !is.na(df[[group_var]]), c(var, group_var), drop = FALSE]
+  tr <- stats::oneway.test(stats::reformulate(group_var, response = var), data = dat, var.equal = FALSE)
+  pw <- stats::pairwise.t.test(dat[[var]], dat[[group_var]], p.adjust.method = "holm", pool.sd = FALSE)
+  phd <- as.data.frame(as.table(pw$p.value), stringsAsFactors = FALSE)
+  names(phd) <- c("Group1", "Group2", "Adjusted_P")
+  phd <- phd[!is.na(phd$Adjusted_P), , drop = FALSE]
+  list(test = "Welch One-Way ANOVA", f_statistic = unname(tr$statistic), df_between = unname(tr$parameter[1]),
+       df_within = unname(tr$parameter[2]), p_value = tr$p.value, significant = tr$p.value < 0.05,
+       method_family = "parametric_robust_variance", post_hoc_df = phd,
+       interpretation = sprintf("Welch F(%.2f, %.2f) = %.3f, p = %.4f. %s",
+                                unname(tr$parameter[1]), unname(tr$parameter[2]), unname(tr$statistic), tr$p.value,
+                                ifelse(tr$p.value < 0.05, "Significant group differences.", "No significant group differences.")))
+}
+
+#' Automatic 3+ group comparison with groupwise normality and variance checks.
+auto_multi_group_test <- function(df, var, group_var, method = "auto") {
+  dat <- df[!is.na(df[[var]]) & !is.na(df[[group_var]]), c(var, group_var), drop = FALSE]
+  dat[[group_var]] <- droplevels(factor(dat[[group_var]]))
+  lev <- levels(dat[[group_var]])
+  if (length(lev) < 3L) return(list(error = "Select a grouping variable with at least three observed groups"))
+  norm <- lapply(lev, function(z) test_normality(dat[[var]][dat[[group_var]] == z]))
+  norm_df <- data.frame(Group = lev,
+                        W = vapply(norm, function(z) z$statistic %||% NA_real_, numeric(1)),
+                        P_value = vapply(norm, function(z) z$p_value %||% NA_real_, numeric(1)))
+  violates <- any(norm_df$P_value < 0.05, na.rm = TRUE)
+  use_nonparam <- identical(method, "nonparametric") || (identical(method, "auto") && violates)
+  if (use_nonparam) {
+    res <- test_kruskal_wallis(dat, var, group_var)
+    if (is.null(res$error)) {
+      pw <- stats::pairwise.wilcox.test(dat[[var]], dat[[group_var]], p.adjust.method = "holm", exact = FALSE)
+      phd <- as.data.frame(as.table(pw$p.value), stringsAsFactors = FALSE); names(phd) <- c("Group1", "Group2", "Adjusted_P")
+      res$post_hoc_df <- phd[!is.na(phd$Adjusted_P), , drop = FALSE]
+      res$method_family <- "nonparametric"; res$normality_df <- norm_df
+      res$selection_reason <- if (identical(method, "auto")) "At least one group had Shapiro-Wilk p < 0.05; Kruskal-Wallis with Holm-adjusted pairwise Wilcoxon was selected." else "Non-parametric method selected manually."
+    }
+    return(res)
+  }
+  homo <- test_homogeneity(dat, var, group_var)
+  if (identical(method, "auto") && identical(homo$equal_variance, FALSE)) {
+    res <- test_welch_anova(dat, var, group_var); res$normality_df <- norm_df; res$homogeneity <- homo
+    res$selection_reason <- "Normality was not rejected, but Levene's test rejected equal variances; Welch ANOVA was selected."
+    return(res)
+  }
+  res <- test_anova(dat, var, group_var)
+  if (is.null(res$error)) {
+    td <- as.data.frame(res$post_hoc[[1]]); td$Comparison <- rownames(td); rownames(td) <- NULL
+    res$post_hoc_df <- td[, c("Comparison", "diff", "lwr", "upr", "p adj"), drop = FALSE]
+    names(res$post_hoc_df) <- c("Comparison", "Difference", "Lower_CI", "Upper_CI", "Adjusted_P")
+    res$method_family <- "parametric"; res$normality_df <- norm_df; res$homogeneity <- homo
+    res$selection_reason <- if (identical(method, "auto")) {
+      if (any(!is.finite(norm_df$P_value))) "Some Shapiro-Wilk checks were inconclusive; classical ANOVA was retained. Inspect Q-Q plots and robustness before final inference."
+      else if (is.na(homo$equal_variance)) "Normality was not rejected, but the variance check was unavailable; classical ANOVA was retained with a recommendation to inspect spread/robustness."
+      else "Groupwise normality was not rejected and equal variance was acceptable; classical ANOVA with Tukey HSD was selected."
+    } else "Parametric method selected manually."
+  }
+  res
+}
+
+stat_variable_type <- function(x) {
+  if (is.ordered(x)) return("ordinal")
+  if (is.factor(x) || is.character(x) || is.logical(x)) {
+    k <- length(unique(as.character(x[!is.na(x)])))
+    return(if (k == 2L) "binary categorical" else "nominal categorical")
+  }
+  if (is.numeric(x)) {
+    vals <- x[!is.na(x)]; u <- length(unique(vals))
+    if (u == 2L) return("binary numeric")
+    if (length(vals) && all(vals >= 0 & abs(vals - round(vals)) < 1e-8) && u < max(30, length(vals)/5)) return("count-like integer")
+    return("continuous numeric")
+  }
+  "other"
+}
+
+analysis_advice <- function(df, outcome, predictor = NULL) {
+  ot <- stat_variable_type(df[[outcome]])
+  if (is.null(predictor) || !nzchar(predictor) || identical(predictor, "(none)")) {
+    txt <- switch(ot,
+      "continuous numeric" = "Describe mean/SD and median/IQR; assess distribution. For modeling, linear regression is the baseline if residual assumptions are adequate; robust/quantile approaches are alternatives when they are not.",
+      "count-like integer" = "This variable looks count-like. If it truly records event/item counts, use counts/rates and consider Poisson regression; if variance materially exceeds the mean, negative-binomial regression is often preferable. If it is an integer-coded continuous/ordinal measure, choose the model for that measurement scale instead.",
+      "binary categorical" = "Use proportions with confidence intervals. For modeling, use binary logistic regression and report odds ratios with 95% confidence intervals.",
+      "binary numeric" = "If the two numeric values represent categories, treat the outcome as binary and use logistic regression; otherwise clarify its measurement scale.",
+      "nominal categorical" = "Use frequency/proportion tables. For modeling, use multinomial logistic regression or classification models such as trees/random forests.",
+      "ordinal" = "Use ordered-category summaries. Ordinal logistic regression is the standard inferential model when proportional-odds assumptions are reasonable.",
+      "Inspect the measurement scale before choosing an inferential model.")
+    return(list(outcome_type = ot, predictor_type = NA_character_, recommendation = txt))
+  }
+  pt <- stat_variable_type(df[[predictor]])
+  rec <- if (ot == "count-like integer") {
+    "If this variable truly represents counts, prefer Poisson regression (or negative-binomial regression when overdispersed) so the mean/variance structure is modeled appropriately. A categorical predictor can enter that model directly; rank-based tests are useful for simple unadjusted comparisons but do not replace a count model when adjusted inference is needed."
+  } else if (ot == "continuous numeric" && pt %in% c("binary categorical", "binary numeric")) {
+    "For a continuous outcome across two independent groups: Welch t-test when assumptions are acceptable; if Shapiro-Wilk rejects normality, use Mann-Whitney U. For paired data use paired t-test or Wilcoxon signed-rank."
+  } else if (ot == "continuous numeric" && pt %in% c("nominal categorical", "ordinal")) {
+    "For a numeric outcome across 3+ groups: ANOVA when assumptions hold; Welch ANOVA for unequal variances; if groupwise normality is rejected, use Kruskal-Wallis followed by multiplicity-adjusted pairwise Wilcoxon tests."
+  } else if (ot == "continuous numeric" && pt == "continuous numeric") {
+    "For two continuous variables: Pearson correlation/linear regression when the linear-model assumptions are reasonable. If distributions are strongly non-normal, ordinal, or dominated by outliers, prefer Spearman (or Kendall) correlation; model inference should be based on residual diagnostics."
+  } else if (ot %in% c("binary categorical", "binary numeric")) {
+    "Binary outcome: use logistic regression for adjusted inference and report odds ratios, 95% CI and p-values. For a single categorical association, chi-square or Fisher's exact test may be appropriate."
+  } else if (ot == "nominal categorical") {
+    "Multiclass nominal outcome: use multinomial logistic regression for interpretable class-vs-reference effects, or classification ML models for prediction."
+  } else if (ot == "ordinal") {
+    "Ordered outcome: use ordinal logistic regression where possible; rank-based tests are appropriate for simple unadjusted comparisons."
+  } else {
+    "Match the analysis to the outcome measurement scale, study design, independence/paired structure, distribution, sample size and modeling objective."
+  }
+  list(outcome_type = ot, predictor_type = pt, recommendation = rec)
 }
 
 #' Perform Chi-square test (already in M5, included for completeness)
@@ -511,7 +734,7 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
     
     ns <- session$ns
 
-    # Captures the ggplot handed to ggplotly() so "Add to Report" can
+    # Captures the ggplot handed to sap_ggplotly() so "Add to Report" can
     # re-render it to PNG. See plot_capture() in 00_services.R.
     pc <- plot_capture()
     
@@ -528,16 +751,90 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
       req(data_exists())
       app_state$processed_data
     })
+
+    observeEvent(list(app_state$data_imported, app_state$settings), {
+      if (!isTRUE(app_state$data_imported)) return(invisible(NULL))
+      method <- if (!is.null(services) && !is.null(services$settings)) {
+        as.character(services$settings$get("correlation_method", "auto"))
+      } else "auto"
+      if (!method %in% c("auto", "pearson", "spearman", "kendall")) method <- "auto"
+      session$onFlushed(function() {
+        updateSelectInput(session, "corr_method", selected = method)
+      }, once = TRUE)
+    }, ignoreInit = FALSE)
     
+    # -----------------------------------------------------------------------
+    # Variable typing + labelling — dictionary-aware (Phase 3c)
+    # -----------------------------------------------------------------------
+    # Same contract established in Descriptive Stats (Phase 3b): the Metadata
+    # Engine is authoritative WHEN PRESENT and never blocking when absent. If the
+    # current project has a dictionary we classify variables by its data_type and
+    # label the dropdowns from it; otherwise we fall back to live derivation off
+    # the data frame, so a dataset loaded outside the import wizard still works.
+    meta_dict <- reactive({
+      if (is.null(services) || is.null(services$metadata)) return(NULL)
+      services$metadata$version()          # refresh when the dictionary changes
+      d <- services$metadata$get()
+      if (is.data.frame(d) && nrow(d) > 0) d else NULL
+    })
+
+    .num_types <- c("numeric", "integer")
+    .cat_types <- c("categorical_character", "character", "logical")
+
     numeric_cols <- reactive({
       req(data_exists())
-      names(df_data())[sapply(df_data(), is.numeric)]
+      df <- df_data()
+      d  <- meta_dict()
+      if (!is.null(d)) {
+        v <- intersect(d$variable[d$data_type %in% .num_types], names(df))
+        if (length(v)) return(v)
+      }
+      names(df)[vapply(df, is.numeric, logical(1))]
     })
-    
+
     categorical_cols <- reactive({
       req(data_exists())
-      names(df_data())[sapply(df_data(), function(x) is.factor(x) || is.character(x))]
+      df <- df_data()
+      d  <- meta_dict()
+      if (!is.null(d)) {
+        v <- intersect(d$variable[d$data_type %in% .cat_types], names(df))
+        if (length(v)) return(v)
+      }
+      names(df)[vapply(df, function(x) is.factor(x) || is.character(x), logical(1))]
     })
+
+    # Named choices (label -> variable): dropdowns display labels, return the
+    # column name. Falls back to the name when no label is stored.
+    labelled_choices <- function(vars) {
+      if (!length(vars)) return(character(0))
+      d <- meta_dict()
+      if (is.null(d)) return(stats::setNames(vars, vars))
+      lbl <- vapply(vars, function(v) {
+        row <- d[d$variable == v, , drop = FALSE]
+        if (nrow(row) && !is.na(row$label[1]) && nzchar(row$label[1]))
+          row$label[1] else v
+      }, character(1))
+      stats::setNames(vars, lbl)
+    }
+
+    # Single variable's display label for result titles and AI payloads.
+    # This helper was missing in this module, although the t-test AI payload
+    # called dlabel(). The resulting "could not find function 'dlabel'" error
+    # was swallowed by the reusable AI component and shown as the misleading
+    # message "Run the analysis first" even when results were already visible.
+    dlabel <- function(v) {
+      if (is.null(v) || length(v) == 0L || is.na(v[1]) || !nzchar(v[1])) return(v)
+      v <- as.character(v[1])
+      d <- meta_dict()
+      if (is.null(d)) return(v)
+      row <- d[d$variable == v, , drop = FALSE]
+      if (nrow(row) && "label" %in% names(row) &&
+          !is.na(row$label[1]) && nzchar(row$label[1])) {
+        as.character(row$label[1])
+      } else {
+        v
+      }
+    }
     
     # =========================================================================
     # NO DATA MESSAGE
@@ -576,19 +873,26 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-6",
                     selectInput(ns("t_var"), "Numeric variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-6",
                     selectInput(ns("t_group"), "Grouping variable (2 groups):",
-                               choices = categorical_cols())
+                               choices = labelled_choices(categorical_cols()))
                   )
                 ),
                 div(class = "row mt-3",
-                  div(class = "col-md-6",
+                  div(class = "col-md-4",
                     checkboxInput(ns("t_paired"), "Paired samples?", value = FALSE)
                   ),
-                  div(class = "col-md-6 pt-2",
-                    actionButton(ns("btn_t_test"), "Run Test", class = "btn-primary")
+                  div(class = "col-md-4",
+                    selectInput(ns("t_method"), "Inference mode:",
+                                choices = c("Automatic (recommended)" = "auto",
+                                            "Parametric" = "parametric",
+                                            "Non-parametric" = "nonparametric"),
+                                selected = "auto")
+                  ),
+                  div(class = "col-md-4 pt-4",
+                    actionButton(ns("btn_t_test"), "Run Comparison", class = "btn-primary")
                   )
                 )
               )
@@ -616,7 +920,9 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
               div(class = "card-header", h5("Test Results")),
               div(class = "card-body",
                 uiOutput(ns("t_test_results")),
-                div(class = "mt-2 text-end", report_button(ns, "add_t_test", "Add to Report"))
+                div(class = "mt-2 d-flex justify-content-end gap-2 align-items-center",
+                    ai_assistant_ui(ns("ai_ttest")),
+                    report_button(ns, "add_t_test", "Add to Report"))
               )
             ),
             
@@ -648,15 +954,24 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-6",
                     selectInput(ns("anova_var"), "Numeric variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-6",
                     selectInput(ns("anova_group"), "Grouping variable:",
-                               choices = categorical_cols())
+                               choices = labelled_choices(categorical_cols()))
                   )
                 ),
-                div(class = "mt-3",
-                  actionButton(ns("btn_anova"), "Run ANOVA", class = "btn-primary")
+                div(class = "row mt-3",
+                  div(class = "col-md-7",
+                    selectInput(ns("anova_method"), "Inference mode:",
+                                choices = c("Automatic (recommended)" = "auto",
+                                            "Parametric" = "parametric",
+                                            "Non-parametric" = "nonparametric"),
+                                selected = "auto")
+                  ),
+                  div(class = "col-md-5 pt-4",
+                    actionButton(ns("btn_anova"), "Run Group Comparison", class = "btn-primary")
+                  )
                 )
               )
             ),
@@ -664,7 +979,7 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
             # Test results
             div(
               class = "card mb-4",
-              div(class = "card-header", h5("ANOVA Results")),
+              div(class = "card-header", h5("Group Comparison Results")),
               div(class = "card-body",
                 uiOutput(ns("anova_results")),
                 div(class = "mt-2 text-end", report_button(ns, "add_anova", "Add to Report"))
@@ -674,7 +989,7 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
             # Post-hoc results
             div(
               class = "card mb-4",
-              div(class = "card-header", h5("Post-hoc Test (Tukey HSD)")),
+              div(class = "card-header", h5("Post-hoc / Pairwise Comparisons")),
               div(class = "card-body",
                 withSpinner(
                   DT::DTOutput(ns("tukey_table")),
@@ -712,17 +1027,20 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-6",
                     selectInput(ns("corr_x"), "X variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-6",
                     selectInput(ns("corr_y"), "Y variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   )
                 ),
                 div(class = "row mt-3",
                   div(class = "col-md-6",
                     selectInput(ns("corr_method"), "Correlation method:",
-                               choices = c("Pearson" = "pearson", "Spearman" = "spearman"))
+                               choices = c("Automatic (normality-aware)" = "auto",
+                                           "Pearson" = "pearson",
+                                           "Spearman" = "spearman",
+                                           "Kendall" = "kendall"), selected = "auto")
                   ),
                   div(class = "col-md-6 pt-4",
                     actionButton(ns("btn_corr"), "Run Test", class = "btn-primary")
@@ -779,11 +1097,11 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-6",
                     selectInput(ns("chi_var1"), "First variable:",
-                               choices = categorical_cols())
+                               choices = labelled_choices(categorical_cols()))
                   ),
                   div(class = "col-md-6",
                     selectInput(ns("chi_var2"), "Second variable:",
-                               choices = categorical_cols())
+                               choices = labelled_choices(categorical_cols()))
                   )
                 ),
                 div(class = "mt-3",
@@ -804,7 +1122,36 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
           )
         ),
         
-        # TAB 5: ASSUMPTIONS & DIAGNOSTICS
+        # TAB 5: ANALYSIS ADVISOR
+        nav_panel(
+          "Analysis Advisor",
+          icon = icon("route"),
+          div(class = "p-4",
+            div(class = "card mb-4",
+              div(class = "card-header", h5("Choose Variables")),
+              div(class = "card-body",
+                div(class = "row",
+                  div(class = "col-md-6",
+                    selectInput(ns("advisor_outcome"), "Outcome / response:", choices = names(df_data()))
+                  ),
+                  div(class = "col-md-6",
+                    selectInput(ns("advisor_predictor"), "Predictor / grouping variable (optional):",
+                                choices = c("(none)", names(df_data())))
+                  )
+                )
+              )
+            ),
+            div(class = "card mb-4",
+              div(class = "card-header", h5("Recommended Analysis")),
+              div(class = "card-body", uiOutput(ns("advisor_results")))
+            ),
+            div(class = "alert alert-secondary small",
+                strong("Important: "),
+                "Automatic recommendations are decision support, not a substitute for study-design knowledge. Independence, repeated measures, survey weights, clustering, sample size, outliers and the scientific question can change the correct test or model.")
+          )
+        ),
+
+        # TAB 6: ASSUMPTIONS & DIAGNOSTICS
         nav_panel(
           "Diagnostics",
           icon = icon("magnifying-glass"),
@@ -817,7 +1164,7 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
                 div(class = "row",
                   div(class = "col-md-8",
                     selectInput(ns("norm_var"), "Select variable:",
-                               choices = numeric_cols())
+                               choices = labelled_choices(numeric_cols()))
                   ),
                   div(class = "col-md-4 pt-4",
                     actionButton(ns("btn_norm"), "Test", class = "btn-info")
@@ -859,111 +1206,69 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
       )
     })
     
+    observeEvent(input$advisor_outcome, {
+      req(input$advisor_outcome, data_exists())
+      choices <- c("(none)", setdiff(names(df_data()), input$advisor_outcome))
+      selected <- if (!is.null(input$advisor_predictor) && input$advisor_predictor %in% choices) input$advisor_predictor else "(none)"
+      updateSelectInput(session, "advisor_predictor", choices = choices, selected = selected)
+    }, ignoreInit = TRUE)
+
     # =========================================================================
     # TAB 1: TWO-SAMPLE TESTS
     # =========================================================================
     
     t_test_result <- reactive({
-      req(input$btn_t_test)
-      req(input$t_var)
-      req(input$t_group)
-      req(data_exists())
-      
-      var <- input$t_var
-      group_var <- input$t_group
-      paired <- input$t_paired
-      
-      df <- df_data() %>%
-        filter(!is.na(!!sym(var)) & !is.na(!!sym(group_var)))
-
-      # Drop unused factor levels first: a factor carrying levels no longer
-      # present would report >2 groups on a filtered dataset.
-      g <- df[[group_var]]
-      if (is.factor(g)) g <- droplevels(g)
-      groups <- sort(unique(as.character(g)))
-
-      if (length(groups) != 2) {
-        return(list(error = sprintf(
-          "Grouping variable must have exactly 2 groups (found %d: %s)",
-          length(groups),
-          paste(utils::head(groups, 5), collapse = ", "))))
-      }
-
-      group1_val <- groups[1]
-      group2_val <- groups[2]
-
-      # Extract the COLUMN, then subset it.
-      #
-      # The previous form was  df[df[[group_var]] == g1, var][[1]]  which is a
-      # silent data.frame/tibble trap: `[.data.frame` has drop = TRUE for a
-      # single column, so it returns a vector and [[1]] then takes its FIRST
-      # ELEMENT -- length 1. On a tibble (drop = FALSE) the same line returns
-      # the whole column. Our import path calls as.data.frame(), so x and y
-      # were always length 1 -> "Need at least 2 observations per group".
-      x <- df[[var]][as.character(g) == group1_val]
-      y <- df[[var]][as.character(g) == group2_val]
-
-      test_t_two_sample(x, y, paired = paired)
+      req(input$btn_t_test, input$t_var, input$t_group, data_exists())
+      auto_two_group_test(df_data(), input$t_var, input$t_group,
+                          paired = isTRUE(input$t_paired),
+                          method = input$t_method %||% "auto")
     })
-    
+
+    t_normality_result <- reactive({
+      req(input$t_var, input$t_group, data_exists())
+      normality_for_group_comparison(df_data(), input$t_var, input$t_group,
+                                     paired = isTRUE(input$t_paired))
+    })
+
     output$t_normality <- renderUI({
-      req(input$t_var)
-      req(data_exists())
-      
-      var <- input$t_var
-      x <- df_data()[[var]]
-      norm_result <- test_normality(x)
-      
+      nr <- t_normality_result()
+      cls <- if (identical(nr$is_normal, FALSE)) "alert-warning" else if (identical(nr$is_normal, TRUE)) "alert-success" else "alert-info"
       div(
-        h6("Shapiro-Wilk Test"),
-        p(norm_result$note, class = "mb-1 small"),
-        p(sprintf("W = %.4f, p = %.4f", norm_result$statistic, norm_result$p_value),
-         class = "small text-muted")
+        h6("Normality decision"),
+        div(class = paste("alert py-2", cls), nr$summary),
+        if (!is.null(nr$details)) tags$table(class = "table table-sm small",
+          tags$thead(tags$tr(lapply(names(nr$details), tags$th))),
+          tags$tbody(lapply(seq_len(nrow(nr$details)), function(i)
+            tags$tr(lapply(nr$details[i, , drop = FALSE], function(z) tags$td(if (is.numeric(z)) sprintf("%.4f", z) else as.character(z)))))))
       )
     })
-    
+
     output$t_homogeneity <- renderUI({
-      req(input$t_var)
-      req(input$t_group)
-      req(data_exists())
-      
+      req(input$t_var, input$t_group, data_exists())
+      if (isTRUE(input$t_paired)) return(div(h6("Variance assumption"), p("Not used for paired comparisons.", class = "small text-muted")))
       homo_result <- test_homogeneity(df_data(), input$t_var, input$t_group)
-      
-      div(
-        h6("Levene's Test"),
-        p(homo_result$note, class = "mb-1 small"),
-        p(sprintf("F = %.4f, p = %.4f", homo_result$statistic, homo_result$p_value),
-         class = "small text-muted")
-      )
+      div(h6("Levene's Test"), p(homo_result$note, class = "mb-1 small"),
+          p(sprintf("F = %.4f, p = %.4f", homo_result$statistic, homo_result$p_value), class = "small text-muted"))
     })
-    
+
     output$t_test_results <- renderUI({
-      req(t_test_result())
-      
       result <- t_test_result()
-      
-      if (!is.null(result$error)) {
-        return(div(class = "alert alert-warning", result$error))
-      }
-      
+      if (!is.null(result$error)) return(div(class = "alert alert-warning", result$error))
+      details <- stat_result_df(result)
+      # Keep the result readable in the app: selection rationale first, then
+      # effect/CI/statistic fields through the common result flattener.
       div(
-        h6(result$test),
-        p(result$interpretation, class = "mb-3 small"),
-        div(
-          class = "row",
-          div(class = "col-md-6",
-            p(sprintf("Mean Diff: %.3f", result$mean_diff), class = "small mb-1"),
-            p(sprintf("95%% CI: [%.3f, %.3f]", result$ci_lower, result$ci_upper), 
-             class = "small")
-          ),
-          div(class = "col-md-6",
-            p(sprintf("Effect Size (d): %.3f", result$cohens_d), class = "small mb-1"),
-            p(sprintf("N₁ = %d, N₂ = %d", result$n1, result$n2), class = "small")
-          )
-        )
+        div(class = if (identical(result$method_family, "nonparametric")) "alert alert-warning" else "alert alert-info",
+            strong("Selected method: "), result$test, br(),
+            span(result$selection_reason %||% "", class = "small sap-translatable-output")),
+        p(result$interpretation %||% "", class = "mb-3 small sap-translatable-output"),
+        tags$table(class = "table table-sm",
+          tags$tbody(lapply(seq_len(nrow(details)), function(i) {
+            tags$tr(tags$th(as.character(details$Statistic[i])), tags$td(as.character(details$Value[i])))
+          })))
       )
     })
-    
+
     output$t_plot <- plotly::renderPlotly({
       req(input$t_var)
       req(input$t_group)
@@ -986,7 +1291,9 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
              y = var) +
         theme(plot.title = element_text(hjust = 0.5, size = 12))
       
-      plotly::ggplotly(pc$keep("t_plot", p), tooltip = c("x", "y"))
+      pc$keep("t_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     # =========================================================================
@@ -994,64 +1301,41 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
     # =========================================================================
     
     anova_result <- reactive({
-      req(input$btn_anova)
-      req(input$anova_var)
-      req(input$anova_group)
-      req(data_exists())
-      
-      test_anova(df_data(), input$anova_var, input$anova_group)
+      req(input$btn_anova, input$anova_var, input$anova_group, data_exists())
+      auto_multi_group_test(df_data(), input$anova_var, input$anova_group,
+                            method = input$anova_method %||% "auto")
     })
-    
+
     output$anova_results <- renderUI({
-      req(anova_result())
-      
       result <- anova_result()
-      
-      if (!is.null(result$error)) {
-        return(div(class = "alert alert-warning", result$error))
-      }
-      
+      if (!is.null(result$error)) return(div(class = "alert alert-warning", result$error))
+      details <- stat_result_df(result)
       div(
-        h6("One-way ANOVA"),
-        p(result$interpretation, class = "mb-3 small"),
-        div(
-          class = "alert alert-info",
-          strong("Interpretation: "),
-          ifelse(result$significant,
-                "There are significant differences between groups.",
-                "No significant differences between groups.")
-        )
+        div(class = if (identical(result$method_family, "nonparametric")) "alert alert-warning" else "alert alert-info",
+            strong("Selected method: "), result$test, br(), span(result$selection_reason %||% "", class = "small sap-translatable-output")),
+        p(result$interpretation %||% "", class = "mb-3 small sap-translatable-output"),
+        if (!is.null(result$normality_df)) tagList(
+          h6("Groupwise Shapiro-Wilk checks"),
+          tags$table(class = "table table-sm small",
+            tags$thead(tags$tr(tags$th("Group"), tags$th("W"), tags$th("p-value"))),
+            tags$tbody(lapply(seq_len(nrow(result$normality_df)), function(i) {
+              r <- result$normality_df[i, ]; tags$tr(tags$td(as.character(r$Group)), tags$td(sprintf("%.4f", r$W)), tags$td(sprintf("%.4f", r$P_value)))
+            })))
+        ),
+        tags$table(class = "table table-sm", tags$tbody(lapply(seq_len(nrow(details)), function(i)
+          tags$tr(tags$th(as.character(details$Statistic[i])), tags$td(as.character(details$Value[i]))))))
       )
     })
-    
-    # Single source for the render AND the report button.
-    tukey_df <- reactive({
-      req(anova_result())
-      result <- anova_result()
-      req(!is.null(result$post_hoc))
 
-      td <- as.data.frame(result$post_hoc[[1]])
-      td$Comparison <- rownames(td)
-      td <- td[, c("Comparison", "diff", "lwr", "upr", "p adj")]
-      colnames(td) <- c("Comparison", "Difference", "Lower CI", "Upper CI", "Adj. p-value")
-      td
+    tukey_df <- reactive({
+      result <- anova_result(); req(is.null(result$error))
+      result$post_hoc_df %||% data.frame(Note = "No post-hoc table is available for this result.", stringsAsFactors = FALSE)
     })
 
     output$tukey_table <- DT::renderDataTable({
-      tukey_df <- tukey_df()
-
-      DT::datatable(
-        tukey_df,
-        options = list(
-          dom = "lftp",
-          columnDefs = list(
-            list(className = 'dt-right', targets = 1:4)
-          )
-        ),
-        rownames = FALSE
-      )
+      DT::datatable(tukey_df(), options = list(dom = "lftp", scrollX = TRUE), rownames = FALSE)
     })
-    
+
     output$anova_plot <- plotly::renderPlotly({
       req(input$anova_var)
       req(input$anova_group)
@@ -1074,75 +1358,67 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
              y = var) +
         theme(plot.title = element_text(hjust = 0.5, size = 12))
       
-      plotly::ggplotly(pc$keep("anova_plot", p), tooltip = c("x", "y"))
+      pc$keep("anova_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     # =========================================================================
     # TAB 3: CORRELATION & REGRESSION
     # =========================================================================
     
-    corr_result <- reactive({
-      req(input$btn_corr)
-      req(input$corr_x)
-      req(input$corr_y)
-      req(data_exists())
-      
-      test_correlation(df_data()[[input$corr_x]], 
-                      df_data()[[input$corr_y]], 
-                      method = input$corr_method)
+    corr_method_resolved <- reactive({
+      req(input$corr_x, input$corr_y, data_exists())
+      requested <- input$corr_method %||% "auto"
+      if (!identical(requested, "auto")) return(list(method = requested, reason = "Correlation method selected manually."))
+      nx <- test_normality(df_data()[[input$corr_x]])
+      ny <- test_normality(df_data()[[input$corr_y]])
+      violates <- identical(nx$is_normal, FALSE) || identical(ny$is_normal, FALSE)
+      if (violates) {
+        list(method = "spearman", reason = "At least one variable has Shapiro-Wilk p < 0.05; Spearman rank correlation was selected automatically.")
+      } else {
+        list(method = "pearson", reason = if (isTRUE(nx$is_normal) && isTRUE(ny$is_normal))
+          "Normality was not rejected for either variable; Pearson correlation was selected automatically."
+          else "Normality was inconclusive for at least one variable; Pearson is retained, but inspect the scatterplot/outliers and consider Spearman if the relationship is monotonic rather than linear.")
+      }
     })
-    
+
+    corr_result <- reactive({
+      req(input$btn_corr, input$corr_x, input$corr_y, data_exists())
+      sel <- corr_method_resolved()
+      res <- test_correlation(df_data()[[input$corr_x]], df_data()[[input$corr_y]], method = sel$method)
+      if (is.null(res$error)) res$selection_reason <- sel$reason
+      res
+    })
+
     regression_result <- reactive({
-      req(input$btn_corr)
-      req(input$corr_x)
-      req(input$corr_y)
-      req(data_exists())
-      
+      req(input$btn_corr, input$corr_x, input$corr_y, data_exists())
       test_linear_regression(df_data(), input$corr_y, input$corr_x)
     })
-    
+
     output$corr_results <- renderUI({
-      req(corr_result())
-      
       result <- corr_result()
-      
-      if (!is.null(result$error)) {
-        return(div(class = "alert alert-warning", result$error))
-      }
-      
+      if (!is.null(result$error)) return(div(class = "alert alert-warning", result$error))
       div(
-        p(result$interpretation, class = "mb-2 small"),
-        div(
-          class = "alert",
-          class = if (result$significant) "alert-success" else "alert-warning",
-          strong(result$test, ": "),
-          ifelse(result$significant, "Significant correlation.", "Not significant.")
-        )
+        div(class = "alert alert-info py-2", strong("Selected: "), result$test, br(), span(result$selection_reason %||% "", class = "small sap-translatable-output")),
+        p(result$interpretation, class = "mb-2 small sap-translatable-output"),
+        div(class = if (result$significant) "alert alert-success" else "alert alert-warning",
+            ifelse(result$significant, "Statistically significant association.", "Association is not statistically significant at alpha = 0.05."))
       )
     })
-    
+
     output$regression_results <- renderUI({
-      req(regression_result())
-      
       result <- regression_result()
-      
-      if (!is.null(result$error)) {
-        return(div(class = "alert alert-warning", result$error))
-      }
-      
-      div(
-        p(result$interpretation, class = "mb-2 small"),
-        div(
-          class = "bg-light p-3 rounded",
-          p(sprintf("Equation: Y = %.3f + %.3f * X", result$intercept, result$slope),
-           class = "small mb-2"),
-          p(sprintf("R² = %.3f (%.1f%% of variance explained)", 
-                   result$r_squared, result$r_squared * 100),
-           class = "small")
-        )
-      )
+      if (!is.null(result$error)) return(div(class = "alert alert-warning", result$error))
+      nr <- tryCatch(test_normality(stats::residuals(stats::lm(stats::reformulate(input$corr_x, response = input$corr_y), data = df_data()))), error = function(e) NULL)
+      warn <- if (!is.null(nr) && identical(nr$is_normal, FALSE))
+        div(class = "alert alert-warning small", "Linear-regression residuals reject normality. Coefficient estimates may still be useful, but small-sample inference can be unreliable; inspect residual plots and consider robust/transformational or generalized models appropriate to the outcome.") else NULL
+      div(p(result$interpretation, class = "mb-2 small sap-translatable-output"), warn,
+          div(class = "bg-light p-3 rounded",
+              p(sprintf("Equation: Y = %.3f + %.3f * X", result$intercept, result$slope), class = "small mb-2"),
+              p(sprintf("R² = %.3f (%.1f%% of variance explained)", result$r_squared, result$r_squared * 100), class = "small")))
     })
-    
+
     output$corr_plot <- plotly::renderPlotly({
       req(input$corr_x)
       req(input$corr_y)
@@ -1159,14 +1435,16 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
       
       p <- ggplot(df, aes(x = !!sym(x_var), y = !!sym(y_var))) +
         geom_point(alpha = 0.5, color = "#0d6efd", size = 2) +
-        geom_smooth(method = "lm", se = TRUE, color = "#dc3545", fill = "#dc354520") +
+        geom_smooth(method = "lm", formula = y ~ x, se = TRUE, color = "#dc3545", fill = "#dc354520") +
         theme_minimal() +
         labs(title = paste0("Relationship between ", x_var, " and ", y_var),
              x = x_var,
              y = y_var) +
         theme(plot.title = element_text(hjust = 0.5, size = 12))
       
-      plotly::ggplotly(pc$keep("corr_plot", p), tooltip = c("x", "y"))
+      pc$keep("corr_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     # =========================================================================
@@ -1192,7 +1470,7 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
       }
       
       div(
-        p(result$interpretation, class = "mb-2 small"),
+        p(result$interpretation, class = "mb-2 small sap-translatable-output"),
         div(
           class = "alert",
           class = if (result$significant) "alert-success" else "alert-warning",
@@ -1205,7 +1483,36 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
     })
     
     # =========================================================================
-    # TAB 5: DIAGNOSTICS
+    # TAB 5: ANALYSIS ADVISOR
+    # =========================================================================
+
+    output$advisor_results <- renderUI({
+      req(input$advisor_outcome, data_exists())
+      pred <- input$advisor_predictor %||% "(none)"
+      adv <- analysis_advice(df_data(), input$advisor_outcome,
+                             if (identical(pred, "(none)")) NULL else pred)
+      div(
+        div(class = "row mb-3",
+          div(class = "col-md-6", strong("Outcome type: "), adv$outcome_type),
+          div(class = "col-md-6", if (!is.na(adv$predictor_type)) tagList(strong("Predictor type: "), adv$predictor_type) else NULL)
+        ),
+        div(class = "alert alert-primary", adv$recommendation),
+        h6("Practical decision guide"),
+        tags$ul(
+          tags$li(strong("Numeric outcome + 2 groups: "), "Welch/paired t-test if assumptions are reasonable; Mann-Whitney or Wilcoxon signed-rank when normality is rejected."),
+          tags$li(strong("Numeric outcome + 3+ groups: "), "ANOVA; Welch ANOVA for unequal variances; Kruskal-Wallis when groupwise normality is rejected."),
+          tags$li(strong("Two numeric/ordinal variables: "), "Pearson for linear parametric association; Spearman/Kendall for rank-based non-parametric association."),
+          tags$li(strong("Two categorical variables: "), "Chi-square; Fisher's exact test when expected cell counts are too small."),
+          tags$li(strong("Binary response: "), "Logistic regression; report odds ratios, 95% CI, p-values and classification performance."),
+          tags$li(strong("Multiclass response: "), "Multinomial logistic regression for interpretable effects, or classification ML for prediction."),
+          tags$li(strong("Count response: "), "Poisson or negative-binomial regression rather than ordinary linear regression when count assumptions apply."),
+          tags$li(strong("Ordered response: "), "Ordinal logistic models or rank-based methods for simpler comparisons.")
+        )
+      )
+    })
+
+    # =========================================================================
+    # TAB 6: DIAGNOSTICS
     # =========================================================================
     
     norm_test_result <- reactive({
@@ -1218,21 +1525,30 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
     
     output$norm_results <- renderUI({
       req(norm_test_result())
-      
       result <- norm_test_result()
-      
-      if (is.na(result$p_value)) {
-        return(div(class = "alert alert-info", result$note))
-      }
-      
+      if (is.na(result$p_value)) return(div(class = "alert alert-info", result$note))
+      violated <- identical(result$is_normal, FALSE)
       div(
         h6("Shapiro-Wilk Test"),
-        p(result$note, class = "mb-2 small"),
-        p(sprintf("W = %.4f, p = %.4f", result$statistic, result$p_value),
-         class = "small text-muted")
+        div(class = if (violated) "alert alert-warning" else "alert alert-success",
+            p(result$note, class = "mb-1"),
+            p(sprintf("W = %.4f, p = %.4f", result$statistic, result$p_value), class = "small mb-0")),
+        if (violated) div(class = "card border-warning mt-3",
+          div(class = "card-header", strong("Non-parametric pathway activated")),
+          div(class = "card-body small",
+            p("Because p < 0.05, this variable rejects the normality assumption. In Automatic mode the inferential module will prefer rank-based alternatives where the selected analysis requires normality."),
+            tags$ul(
+              tags$li("2 independent groups → Mann-Whitney U (Wilcoxon rank-sum)."),
+              tags$li("2 paired measurements → Wilcoxon signed-rank."),
+              tags$li("3+ independent groups → Kruskal-Wallis, followed by Holm-adjusted pairwise Wilcoxon comparisons when needed."),
+              tags$li("Correlation → Spearman rank correlation (or Kendall for ordinal/small-sample settings)."),
+              tags$li("For regression, test the model residuals rather than requiring the raw outcome itself to be normal; choose a generalized, robust or transformation-based model when the outcome/distribution calls for it.")
+            )
+          )
+        ) else NULL
       )
     })
-    
+
     output$qq_plot <- plotly::renderPlotly({
       req(input$norm_var)
       req(data_exists())
@@ -1255,7 +1571,9 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
              y = "Sample Quantiles") +
         theme(plot.title = element_text(hjust = 0.5, size = 12))
       
-      plotly::ggplotly(pc$keep("qq_plot", p), tooltip = c("x", "y"))
+      pc$keep("qq_plot", p)
+      
+      sap_ggplotly(p, tooltip = c("x", "y"))
     })
     
     # =========================================================================
@@ -1267,6 +1585,7 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
         paste0("diagnostic_report_", Sys.Date(), ".html")
       },
       content = function(file) {
+        sap_export_assert(services, "statistical diagnostics HTML export")
         html_content <- sprintf(
           "<!DOCTYPE html>
           <html>
@@ -1317,14 +1636,41 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
     # officer body_add_table() path in 08 work with no extra code.
     # =========================================================================
 
+    # --- AI interpretation (Phase A: Statistical Tests is the first module) ---
+    # The payload is STRUCTURED — the test-result data frame, variable LABELS,
+    # assumptions, and N. No raw dataset is ever sent. dlabel() gives the AI the
+    # human-readable variable names from the metadata dictionary.
+    mod_ai_assistant_server(
+      "ai_ttest", services,
+      payload = function() {
+        res <- tryCatch(t_test_result(), error = function(e) NULL)
+        if (is.null(res) || !is.null(res$error)) return(NULL)
+        assumptions <- c(
+          res$selection_reason %||% NULL,
+          tryCatch(sprintf("Group-aware Shapiro-Wilk normality assessment for %s", dlabel(input$t_var)), error = function(e) NULL),
+          if (isTRUE(input$t_paired)) "Paired analysis assumes correctly matched observations" else "Independent-group analysis assumes independent observations")
+        list(
+          analysis_type = res$test %||% if (isTRUE(input$t_paired)) "Paired comparison" else "Independent two-group comparison",
+          variables = c(dlabel(input$t_var), dlabel(input$t_group)),
+          results   = stat_result_df(res),
+          assumptions = assumptions,
+          n = tryCatch(nrow(df_data()), error = function(e) NULL),
+          metadata = list(outcome = dlabel(input$t_var),
+                          grouping = dlabel(input$t_group))
+        )
+      })
+
     # --- Two-sample tests ---
     register_report_button(
       input, services, "add_t_test", kind = "table",
-      title   = function() sprintf("t-test: %s by %s", input$t_var, input$t_group),
+      title   = function() sprintf("Two-group comparison: %s by %s", input$t_var, input$t_group),
       payload = function() stat_result_df(t_test_result()),
-      code    = function() sprintf('t.test(%s ~ %s, data = df, paired = %s)',
-                                   input$t_var, input$t_group,
-                                   if (isTRUE(input$t_paired)) "TRUE" else "FALSE"))
+      code    = function() {
+        res <- t_test_result()
+        if (grepl("Wilcoxon|Mann-Whitney", res$test %||% ""))
+          sprintf('wilcox.test(%s ~ %s, data = df, paired = %s, exact = FALSE)', input$t_var, input$t_group, if (isTRUE(input$t_paired)) "TRUE" else "FALSE")
+        else sprintf('t.test(%s ~ %s, data = df, paired = %s)', input$t_var, input$t_group, if (isTRUE(input$t_paired)) "TRUE" else "FALSE")
+      })
 
     register_report_button(
       input, services, "add_t_plot", kind = "plot",
@@ -1345,11 +1691,10 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
 
     register_report_button(
       input, services, "add_tukey", kind = "table",
-      title   = function() sprintf("Tukey HSD: %s by %s",
+      title   = function() sprintf("Post-hoc comparisons: %s by %s",
                                    input$anova_var, input$anova_group),
       payload = function() tukey_df(),
-      code    = function() sprintf('TukeyHSD(aov(%s ~ %s, data = df))',
-                                   input$anova_var, input$anova_group))
+      code    = function() "# Post-hoc method follows the selected omnibus test (Tukey, pairwise Welch t, or pairwise Wilcoxon with multiplicity adjustment).")
 
     register_report_button(
       input, services, "add_anova_plot", kind = "plot",
@@ -1363,11 +1708,10 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
     # --- Correlation & regression ---
     register_report_button(
       input, services, "add_corr", kind = "table",
-      title   = function() sprintf("%s correlation: %s vs %s",
-                                   input$corr_method, input$corr_x, input$corr_y),
+      title   = function() sprintf("%s: %s vs %s", corr_result()$test, input$corr_x, input$corr_y),
       payload = function() stat_result_df(corr_result()),
       code    = function() sprintf('cor.test(df$%s, df$%s, method = "%s")',
-                                   input$corr_x, input$corr_y, input$corr_method))
+                                   input$corr_x, input$corr_y, corr_result()$method))
 
     register_report_button(
       input, services, "add_corr_plot", kind = "plot",
@@ -1414,4 +1758,4 @@ mod_statistical_tests_server <- function(id, app_state, services = NULL) {
 # END OF MODULE 6: STATISTICAL TESTS
 # =============================================================================
 
-message("[SAP] Statistical Tests v2.3.1-20260708 loaded")  # SAP_MODULE_BANNER
+message("[SAP] Statistical Tests v2.5-20260709 loaded")  # SAP_MODULE_BANNER

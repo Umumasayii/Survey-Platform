@@ -1,0 +1,42 @@
+# Survey Analytics Platform — safe local environment template.
+# Copy to .Renviron only if you need custom settings. Never commit real secrets.
+# Restart R after changing a project-local .Renviron file.
+
+# Standalone starts without PostgreSQL while preserving login and signup.
+SAP_RUNTIME_PROFILE=standalone
+SAP_ALLOW_SIGNUP=true
+SAP_ALLOW_GUEST=false
+SAP_REQUIRE_SIGNUP_APPROVAL=false
+SAP_SESSION_HOURS=12
+SAP_MAX_UPLOAD_MB=100
+
+# Optional private directory for standalone accounts. Leave empty to use the
+# protected application-instance default. Never use a folder inside www.
+SAP_AUTH_DATA_DIR=
+
+# PostgreSQL production: uncomment and replace every setting below, then change
+# SAP_RUNTIME_PROFILE above from standalone to production.
+# SAP_PG_HOST=your-postgresql-host
+# SAP_PG_PORT=5432
+# SAP_PG_DB=survey_analytics
+# SAP_PG_USER=your-application-user
+# SAP_PG_PASSWORD=REPLACE_WITH_A_STRONG_PRIVATE_PASSWORD
+# SAP_PG_SCHEMA=sap
+# SAP_PG_SSLMODE=require
+# SAP_PG_CONNECT_TIMEOUT=10
+# SAP_PG_POOL_MIN=1
+# SAP_PG_POOL_MAX=8
+# SAP_INSTALL_POSTGRESQL=true
+# SAP_DEPLOY_POSTGRESQL=true
+# SAP_PSEUDONYM_KEY=REPLACE_WITH_AT_LEAST_32_RANDOM_CHARACTERS
+# SAP_MFA_ENCRYPTION_KEY=REPLACE_WITH_A_DIFFERENT_LONG_RANDOM_SECRET
+
+# Optional outbound access and transactional email.
+# SAP_ALLOWED_REMOTE_HOSTS=
+# SAP_ALLOWED_AI_HOSTS=
+# SAP_SMTP_URL=
+# SAP_SMTP_FROM=
+# SAP_SMTP_USER=
+# SAP_SMTP_PASSWORD=
+# OLLAMA_BASE_URL=
+# OLLAMA_MODEL=

@@ -1,0 +1,26 @@
+{
+  "release": "Survey Analytics & M&E Professional 6.0.1",
+  "root": "Survey_Analytics_M_E_Professional_6_0_1",
+  "r_files_scanned": 102,
+  "stylesheets_scanned": 3,
+  "automated_test_files": 25,
+  "automated_test_cases": 81,
+  "navigation_i18n_behavior": "PASS",
+  "documentation_pages": 14,
+  "migrations": [
+    "001_core_platform.sql",
+    "002_project_ownership.sql",
+    "003_admin_control_center.sql",
+    "004_user_workspace_state.sql",
+    "005_nexus_studio.sql",
+    "006_enterprise_platform.sql",
+    "007_monitoring_evaluation.sql"
+  ],
+  "monitoring_indicator_templates": 16,
+  "data_literacy_glossary_terms": 36,
+  "synthetic_monitoring_records": 360,
+  "content_sha256": "59ab230f02f1b0d77ab9d2baf49cf0f50d617ebd7bc67c9d162f0c56fb390859",
+  "warnings": [],
+  "errors": [],
+  "status": "PASS"
+}
